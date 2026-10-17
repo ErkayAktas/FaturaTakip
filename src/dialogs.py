@@ -71,15 +71,20 @@ class VadeGirisDialog(QDialog):
             display_date = raw_date
         date_lbl = QLabel(display_date)
 
-        amount_val = float(self.invoice.get("amount", 0.0))
+        tax_ex_val = float(self.invoice.get("tax_excluded_amount") or 0.0)
+        kdv_val = float(self.invoice.get("kdv_amount") or 0.0)
         currency = str(self.invoice.get("currency", "TL"))
-        amount_lbl = QLabel(f"{amount_val:,.2f} {currency}")
-        amount_lbl.setStyleSheet("font-weight: bold; color: #34D399; font-size: 14px;")
+
+        tax_ex_lbl = QLabel(f"{tax_ex_val:,.2f} {currency}")
+        tax_ex_lbl.setStyleSheet("font-weight: bold; color: #38BDF8; font-size: 13px;")
+        kdv_lbl = QLabel(f"{kdv_val:,.2f} {currency}")
+        kdv_lbl.setStyleSheet("font-weight: bold; color: #34D399; font-size: 13px;")
 
         info_layout.addRow("Şirket İsmi:", company_lbl)
         info_layout.addRow("Fatura No:", inv_no_lbl)
         info_layout.addRow("Kesim Tarihi:", date_lbl)
-        info_layout.addRow("Fatura Tutarı:", amount_lbl)
+        info_layout.addRow("Vergi Hariç Tutar:", tax_ex_lbl)
+        info_layout.addRow("KDV Tutarı:", kdv_lbl)
 
         layout.addWidget(info_frame)
 
@@ -98,7 +103,7 @@ class VadeGirisDialog(QDialog):
         spin_layout = QHBoxLayout()
         self.work_days_spin = QSpinBox()
         self.work_days_spin.setRange(1, 365)
-        self.work_days_spin.setValue(15)  # Varsayılan 15 iş günü
+        self.work_days_spin.setValue(7)  # Varsayılan 7 iş günü (15'ten 7'ye düşürüldü)
         self.work_days_spin.setStyleSheet("font-size: 15px; font-weight: bold; padding: 8px;")
         self.work_days_spin.valueChanged.connect(self._recalculate_preview)
 
@@ -219,11 +224,18 @@ class OdemeGirisDialog(QDialog):
         info_layout.addRow("Şirket İsmi:", QLabel(str(self.invoice.get("company_name", "-"))))
         info_layout.addRow("Fatura No:", QLabel(str(self.invoice.get("invoice_number", "-"))))
         
-        amt = float(self.invoice.get("amount", 0.0))
+        tax_ex = float(self.invoice.get("tax_excluded_amount", 0.0))
+        kdv = float(self.invoice.get("kdv_amount", 0.0))
         cur = str(self.invoice.get("currency", "TL"))
-        amt_lbl = QLabel(f"{amt:,.2f} {cur}")
-        amt_lbl.setStyleSheet("color: #34D399; font-weight: bold;")
-        info_layout.addRow("Fatura Tutarı:", amt_lbl)
+        total_calc = round(tax_ex + kdv, 2)
+
+        tax_lbl = QLabel(f"{tax_ex:,.2f} {cur}")
+        tax_lbl.setStyleSheet("color: #38BDF8; font-weight: bold;")
+        info_layout.addRow("Vergi Hariç Tutar:", tax_lbl)
+
+        kdv_lbl = QLabel(f"{kdv:,.2f} {cur}")
+        kdv_lbl.setStyleSheet("color: #F59E0B; font-weight: bold;")
+        info_layout.addRow("KDV Tutarı:", kdv_lbl)
 
         # Son Ödeme Tarihi (Vade) - Kullanıcı tarafından güncellenebilir
         self.due_date_edit = QDateEdit()
@@ -298,7 +310,7 @@ class OdemeGirisDialog(QDialog):
         if existing_paid_amt is not None:
             self.paid_amount_spin.setValue(float(existing_paid_amt))
         else:
-            self.paid_amount_spin.setValue(amt)
+            self.paid_amount_spin.setValue(total_calc)
 
         pay_form.addRow("Ödeme Tarihi:", self.payment_date_edit)
         pay_form.addRow("Ödenen Tutar:", self.paid_amount_spin)

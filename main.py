@@ -152,12 +152,14 @@ class FaturaTakipApp(QMainWindow):
         self.card_pending = StatCard("DÜZENLENECEK (EKSİK VADE)", "0", "#F59E0B")
         self.card_all_active = StatCard("AKTİF / BEKLEYEN", "0", "#3B82F6")
         self.card_due_urgent = StatCard("VADESİ GELMİŞ / GEÇMİŞ", "0", "#EF4444")
-        self.card_paid_total = StatCard("TOPLAM ÖDENEN TUTAR", "0.00 TL", "#10B981")
+        self.card_total_tax_excluded = StatCard("TOPLAM VERGİ HARİÇ TUTAR", "0.00 TL", "#10B981")
+        self.card_total_kdv = StatCard("TOPLAM KDV TUTARI", "0.00 TL", "#38BDF8")
 
         layout.addWidget(self.card_pending)
         layout.addWidget(self.card_all_active)
         layout.addWidget(self.card_due_urgent)
-        layout.addWidget(self.card_paid_total)
+        layout.addWidget(self.card_total_tax_excluded)
+        layout.addWidget(self.card_total_kdv)
 
         return container
 
@@ -173,10 +175,10 @@ class FaturaTakipApp(QMainWindow):
         info_lbl.setStyleSheet("color: #94A3B8; font-size: 12px; margin-bottom: 4px;")
         layout.addWidget(info_lbl)
 
-        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Ödenecek Tutar
-        headers = ["Şirket İsmi", "Fatura No", "Fatura Kesim Tarihi", "Ödenecek Tutar"]
+        # Sütunlar: Şirket İsmi, Fatura No, Fatura Kesim Tarihi, Vergi Hariç Tutar, KDV Tutarı
+        headers = ["Şirket İsmi", "Fatura No", "Fatura Kesim Tarihi", "Vergi Hariç Tutar", "KDV Tutarı"]
         self.table_pending = SortableTableWidget(headers)
-        self.table_pending.set_column_weights([0.45, 0.22, 0.15, 0.18])
+        self.table_pending.set_column_weights([0.38, 0.20, 0.14, 0.14, 0.14])
         self.table_pending.cellDoubleClicked.connect(self._on_pending_cell_double_clicked)
         self.table_pending.copied_to_clipboard.connect(self._show_clipboard_status)
         layout.addWidget(self.table_pending)
@@ -215,18 +217,19 @@ class FaturaTakipApp(QMainWindow):
 
         layout.addLayout(legend_layout)
 
-        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Ödenecek Tutar, Son Ödeme Tarihi, Ödenme Durumu, Kalan Gün Sayısı
+        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Vergi Hariç Tutar, KDV Tutarı, Son Ödeme Tarihi, Ödenme Durumu, Kalan Gün Sayısı
         headers = [
             "Şirket İsmi",
             "Fatura No",
             "Fatura Tarihi",
-            "Ödenecek Tutar",
+            "Vergi Hariç Tutar",
+            "KDV Tutarı",
             "Son Ödeme Tarihi",
             "Ödenme Durumu",
             "Kalan Gün Sayısı",
         ]
         self.table_all = SortableTableWidget(headers)
-        self.table_all.set_column_weights([0.30, 0.16, 0.11, 0.14, 0.11, 0.09, 0.09])
+        self.table_all.set_column_weights([0.26, 0.14, 0.10, 0.13, 0.11, 0.10, 0.08, 0.08])
         self.table_all.cellDoubleClicked.connect(self._on_all_cell_double_clicked)
         self.table_all.copied_to_clipboard.connect(self._show_clipboard_status)
         layout.addWidget(self.table_all)
@@ -243,10 +246,10 @@ class FaturaTakipApp(QMainWindow):
         info_lbl.setStyleSheet("color: #F87171; font-size: 12px; font-weight: 600; margin-bottom: 4px;")
         layout.addWidget(info_lbl)
 
-        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Ödenecek Tutar, Son Ödeme Tarihi
-        headers = ["Şirket İsmi", "Fatura No", "Fatura Tarihi", "Ödenecek Tutar", "Son Ödeme Tarihi"]
+        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Vergi Hariç Tutar, KDV Tutarı, Son Ödeme Tarihi
+        headers = ["Şirket İsmi", "Fatura No", "Fatura Tarihi", "Vergi Hariç Tutar", "KDV Tutarı", "Son Ödeme Tarihi"]
         self.table_due = SortableTableWidget(headers)
-        self.table_due.set_column_weights([0.38, 0.18, 0.14, 0.15, 0.15])
+        self.table_due.set_column_weights([0.34, 0.16, 0.12, 0.13, 0.12, 0.13])
         self.table_due.cellDoubleClicked.connect(self._on_due_cell_double_clicked)
         self.table_due.copied_to_clipboard.connect(self._show_clipboard_status)
         layout.addWidget(self.table_due)
@@ -257,7 +260,7 @@ class FaturaTakipApp(QMainWindow):
         layout.setContentsMargins(10, 12, 10, 10)
         layout.setSpacing(10)
 
-        # Araçlar: Tarih Seçiciler (Date Picker) ve Filtrele Butonları
+        # Araçlar: Tarih Seçiciler (Date Picker / DateEntry) ve Filtrele Butonları
         filter_box = QFrame()
         filter_box.setStyleSheet(f"background-color: #1A2438; border-radius: 8px; padding: 6px;")
         filter_layout = QHBoxLayout(filter_box)
@@ -276,6 +279,8 @@ class FaturaTakipApp(QMainWindow):
         self.date_from.setMinimumDate(QDate(1900, 1, 1))
         self.date_from.setSpecialValueText(" ")
         self.date_from.setDate(QDate(start_dt.year, start_dt.month, start_dt.day))
+        if self.date_from.calendarWidget():
+            self.date_from.calendarWidget().setGridVisible(True)
         if self.date_from.lineEdit():
             self.date_from.lineEdit().setClearButtonEnabled(True)
 
@@ -287,6 +292,8 @@ class FaturaTakipApp(QMainWindow):
         self.date_to.setMinimumDate(QDate(1900, 1, 1))
         self.date_to.setSpecialValueText(" ")
         self.date_to.setDate(QDate(today_dt.year, today_dt.month, today_dt.day))
+        if self.date_to.calendarWidget():
+            self.date_to.calendarWidget().setGridVisible(True)
         if self.date_to.lineEdit():
             self.date_to.lineEdit().setClearButtonEnabled(True)
 
@@ -294,7 +301,7 @@ class FaturaTakipApp(QMainWindow):
         self.btn_filter_paid.setToolTip("Seçilen tarih aralığına göre ödenmiş faturaları filtrele")
         self.btn_filter_paid.clicked.connect(self._on_filter_paid_clicked)
 
-        # macOS klavye Enter/Return desteği
+        # macOS ve Windows klavye Enter/Return desteği
         if self.date_from.lineEdit():
             self.date_from.lineEdit().returnPressed.connect(self._on_filter_paid_clicked)
         if self.date_to.lineEdit():
@@ -314,10 +321,10 @@ class FaturaTakipApp(QMainWindow):
 
         layout.addWidget(filter_box)
 
-        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Ödenmiş Tutar, Ödeme Tarihi
-        headers = ["Şirket İsmi", "Fatura No", "Fatura Tarihi", "Ödenmiş Tutar", "Ödeme Tarihi"]
+        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Vergi Hariç Tutar, KDV Tutarı, Ödeme Tarihi
+        headers = ["Şirket İsmi", "Fatura No", "Fatura Tarihi", "Vergi Hariç Tutar", "KDV Tutarı", "Ödeme Tarihi"]
         self.table_paid = SortableTableWidget(headers)
-        self.table_paid.set_column_weights([0.38, 0.18, 0.14, 0.15, 0.15])
+        self.table_paid.set_column_weights([0.34, 0.16, 0.12, 0.13, 0.12, 0.13])
         self.table_paid.cellDoubleClicked.connect(self._on_paid_cell_double_clicked)
         self.table_paid.copied_to_clipboard.connect(self._show_clipboard_status)
         layout.addWidget(self.table_paid)
@@ -360,22 +367,33 @@ class FaturaTakipApp(QMainWindow):
         self._load_tab_all()
         self._load_tab_due()
         self._load_tab_paid()
-        self._update_stat_cards()
         self._apply_current_search_filter()
 
-    def _update_stat_cards(self):
+    def _update_stat_cards(self, displayed_paid_invoices: Optional[List[Dict[str, Any]]] = None):
+        """
+        Dinamik Toplam Hesaplama (Özet Panel):
+        Ödenmiş faturalar sekmesinde bir tarih filtrelemesi uygulandığında veya
+        sayfa güncellendiğinde 'Toplam Vergi Hariç Tutar' ve 'Toplam KDV Tutarı'
+        yalnızca filtrelenmiş listedeki faturaların toplamlarını anlık olarak gösterir.
+        """
         pending_count = len(self.db.get_pending_invoices())
         all_complete = self.db.get_all_complete_invoices()
         active_count = len([i for i in all_complete if i.get("status") != "paid"])
         due_count = len(self.db.get_due_invoices())
 
-        paid_invoices = self.db.get_paid_invoices()
-        total_paid = sum(float(i.get("paid_amount") or i.get("amount") or 0.0) for i in paid_invoices)
+        if displayed_paid_invoices is not None:
+            paid_invoices = displayed_paid_invoices
+        else:
+            paid_invoices = self.db.get_paid_invoices()
+
+        total_tax_excluded = sum(float(i.get("tax_excluded_amount") or 0.0) for i in paid_invoices)
+        total_kdv = sum(float(i.get("kdv_amount") or 0.0) for i in paid_invoices)
 
         self.card_pending.set_value(str(pending_count))
         self.card_all_active.set_value(str(active_count))
         self.card_due_urgent.set_value(str(due_count))
-        self.card_paid_total.set_value(f"{total_paid:,.2f} TL")
+        self.card_total_tax_excluded.set_value(f"{total_tax_excluded:,.2f} TL")
+        self.card_total_kdv.set_value(f"{total_kdv:,.2f} TL")
 
     def _load_tab_pending(self):
         invoices = self.db.get_pending_invoices()
@@ -383,9 +401,6 @@ class FaturaTakipApp(QMainWindow):
         self.table_pending.clearSelection()
         self.table_pending.clearContents()
         self.table_pending.setRowCount(len(invoices))
-
-        white_bg = QColor("#FFFFFF")
-        dark_text = QColor("#0F172A")
 
         for row, inv in enumerate(invoices):
             # 0: Şirket İsmi
@@ -402,11 +417,17 @@ class FaturaTakipApp(QMainWindow):
             d_item = DateTableWidgetItem(inv.get("invoice_date"))
             self.table_pending.setItem(row, 2, d_item)
 
-            # 3: Ödenecek Tutar
-            amt = float(inv.get("amount", 0.0))
             cur = str(inv.get("currency", "TL"))
-            amt_item = NumericTableWidgetItem(amt, f"{amt:,.2f} {cur}")
-            self.table_pending.setItem(row, 3, amt_item)
+
+            # 3: Vergi Hariç Tutar
+            tax_ex = float(inv.get("tax_excluded_amount") or 0.0)
+            tax_item = NumericTableWidgetItem(tax_ex, f"{tax_ex:,.2f} {cur}")
+            self.table_pending.setItem(row, 3, tax_item)
+
+            # 4: KDV Tutarı
+            kdv = float(inv.get("kdv_amount") or 0.0)
+            kdv_item = NumericTableWidgetItem(kdv, f"{kdv:,.2f} {cur}")
+            self.table_pending.setItem(row, 4, kdv_item)
 
         self.table_pending.setSortingEnabled(True)
         # Sütun ve Ekran Optimizasyonu
@@ -424,6 +445,7 @@ class FaturaTakipApp(QMainWindow):
             status = str(inv.get("status", "active"))
             due_date = inv.get("due_date")
             days_left = holiday_service.get_days_remaining(due_date)
+            cur = str(inv.get("currency", "TL"))
 
             # 0: Şirket İsmi
             c_item = QTableWidgetItem(str(inv.get("company_name", "")))
@@ -438,23 +460,27 @@ class FaturaTakipApp(QMainWindow):
             d_item = DateTableWidgetItem(inv.get("invoice_date"))
             self.table_all.setItem(row, 2, d_item)
 
-            # 3: Ödenecek Tutar
-            amt = float(inv.get("amount", 0.0))
-            cur = str(inv.get("currency", "TL"))
-            amt_item = NumericTableWidgetItem(amt, f"{amt:,.2f} {cur}")
-            self.table_all.setItem(row, 3, amt_item)
+            # 3: Vergi Hariç Tutar
+            tax_ex = float(inv.get("tax_excluded_amount") or 0.0)
+            tax_item = NumericTableWidgetItem(tax_ex, f"{tax_ex:,.2f} {cur}")
+            self.table_all.setItem(row, 3, tax_item)
 
-            # 4: Son Ödeme Tarihi
+            # 4: KDV Tutarı
+            kdv = float(inv.get("kdv_amount") or 0.0)
+            kdv_item = NumericTableWidgetItem(kdv, f"{kdv:,.2f} {cur}")
+            self.table_all.setItem(row, 4, kdv_item)
+
+            # 5: Son Ödeme Tarihi
             due_item = DateTableWidgetItem(due_date)
-            self.table_all.setItem(row, 4, due_item)
+            self.table_all.setItem(row, 5, due_item)
 
-            # 5: Ödenme Durumu
+            # 6: Ödenme Durumu
             status_text = "✓ Ödendi" if status == "paid" else "Ödenmedi"
             s_item = QTableWidgetItem(status_text)
             s_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_all.setItem(row, 5, s_item)
+            self.table_all.setItem(row, 6, s_item)
 
-            # 6: Kalan Gün Sayısı
+            # 7: Kalan Gün Sayısı
             if status == "paid":
                 kalan_item = QTableWidgetItem("Tamamlandı")
                 kalan_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -472,7 +498,7 @@ class FaturaTakipApp(QMainWindow):
                 kalan_item = QTableWidgetItem("-")
                 kalan_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            self.table_all.setItem(row, 6, kalan_item)
+            self.table_all.setItem(row, 7, kalan_item)
 
             # UYARI VE SATIR RENKLENDİRMESİ:
             # 1. Vadesine 2 günden fazla süre olan faturalar -> BEYAZ zemin
@@ -517,6 +543,7 @@ class FaturaTakipApp(QMainWindow):
 
         for row, inv in enumerate(invoices):
             inv_no = str(inv.get("invoice_number", ""))
+            cur = str(inv.get("currency", "TL"))
 
             # 0: Şirket İsmi
             c_item = QTableWidgetItem(str(inv.get("company_name", "")))
@@ -532,15 +559,19 @@ class FaturaTakipApp(QMainWindow):
             d_item = DateTableWidgetItem(inv.get("invoice_date"))
             self.table_due.setItem(row, 2, d_item)
 
-            # 3: Ödenecek Tutar
-            amt = float(inv.get("amount", 0.0))
-            cur = str(inv.get("currency", "TL"))
-            amt_item = NumericTableWidgetItem(amt, f"{amt:,.2f} {cur}")
-            self.table_due.setItem(row, 3, amt_item)
+            # 3: Vergi Hariç Tutar
+            tax_ex = float(inv.get("tax_excluded_amount") or 0.0)
+            tax_item = NumericTableWidgetItem(tax_ex, f"{tax_ex:,.2f} {cur}")
+            self.table_due.setItem(row, 3, tax_item)
 
-            # 4: Son Ödeme Tarihi
+            # 4: KDV Tutarı
+            kdv = float(inv.get("kdv_amount") or 0.0)
+            kdv_item = NumericTableWidgetItem(kdv, f"{kdv:,.2f} {cur}")
+            self.table_due.setItem(row, 4, kdv_item)
+
+            # 5: Son Ödeme Tarihi
             due_item = DateTableWidgetItem(inv.get("due_date"))
-            self.table_due.setItem(row, 4, due_item)
+            self.table_due.setItem(row, 5, due_item)
 
         self.table_due.setSortingEnabled(True)
         # Sütun ve Ekran Optimizasyonu
@@ -550,7 +581,7 @@ class FaturaTakipApp(QMainWindow):
     def _on_filter_paid_clicked(self):
         """
         Filtrele butonu doğrudan tıklama / komut tetikleyicisi.
-        macOS event döngüsü ve buton tıklamalarını doğrudan karşılar.
+        macOS ve Windows event döngüsü ve buton tıklamalarını doğrudan karşılar.
         """
         print("\n" + "=" * 55)
         print("[Filtrele Butonu] Butona tıklandı (Command / Clicked Event tetiklendi).")
@@ -569,7 +600,7 @@ class FaturaTakipApp(QMainWindow):
             end_val = None
             print("[Filtre İzolasyonu] 'Tümünü Göster' tetiklendi: DatePicker değerleri KORUNDU, tüm liste getiriliyor.")
         else:
-            # 1. macOS Odaklanma (Focus) ve DatePicker Senkronizasyonu
+            # 1. macOS ve Windows Odaklanma (Focus) ve DatePicker Senkronizasyonu
             if hasattr(self, "date_from") and self.date_from:
                 self.date_from.interpretText()
             if hasattr(self, "date_to") and self.date_to:
@@ -591,7 +622,7 @@ class FaturaTakipApp(QMainWindow):
             if hasattr(self, "date_to") and self.date_to.date() != self.date_to.minimumDate() and end_clean:
                 end_val = end_clean
 
-            # macOS DatePicker Log Kontrolü
+            # DatePicker Uyumluluk Log Kontrolü
             print(f"[DatePicker Uyumluluk Logu] Başlangıç Tarihi: '{start_val}' (Ham: '{start_raw}') | Bitiş Tarihi: '{end_val}' (Ham: '{end_raw}')")
 
         # 3. Hata Yakalama (Try-Except ValueError) ile veritabanı sorgusu
@@ -605,7 +636,7 @@ class FaturaTakipApp(QMainWindow):
             print(f"[Filtreleme Hatası] Beklenmeyen hata: {e}")
             invoices = self.db.get_paid_invoices()
 
-        # 4. Tabloyu (Treeview) önce tamamen temizle
+        # 4. Tabloyu önce tamamen temizle
         self.table_paid.setSortingEnabled(False)
         self.table_paid.clearSelection()
         self.table_paid.clearContents()
@@ -615,6 +646,7 @@ class FaturaTakipApp(QMainWindow):
         self.table_paid.setRowCount(len(invoices))
         for row, inv in enumerate(invoices):
             inv_no = str(inv.get("invoice_number", ""))
+            cur = str(inv.get("currency", "TL"))
 
             # 0: Şirket İsmi
             c_item = QTableWidgetItem(str(inv.get("company_name", "")))
@@ -630,20 +662,28 @@ class FaturaTakipApp(QMainWindow):
             d_item = DateTableWidgetItem(inv.get("invoice_date"))
             self.table_paid.setItem(row, 2, d_item)
 
-            # 3: Ödenmiş Tutar
-            paid_amt = float(inv.get("paid_amount") or inv.get("amount") or 0.0)
-            cur = str(inv.get("currency", "TL"))
-            amt_item = NumericTableWidgetItem(paid_amt, f"{paid_amt:,.2f} {cur}")
-            self.table_paid.setItem(row, 3, amt_item)
+            # 3: Vergi Hariç Tutar
+            tax_ex = float(inv.get("tax_excluded_amount") or 0.0)
+            tax_item = NumericTableWidgetItem(tax_ex, f"{tax_ex:,.2f} {cur}")
+            self.table_paid.setItem(row, 3, tax_item)
 
-            # 4: Ödeme Tarihi
+            # 4: KDV Tutarı
+            kdv = float(inv.get("kdv_amount") or 0.0)
+            kdv_item = NumericTableWidgetItem(kdv, f"{kdv:,.2f} {cur}")
+            self.table_paid.setItem(row, 4, kdv_item)
+
+            # 5: Ödeme Tarihi
             pay_date = inv.get("payment_date") or inv.get("invoice_date")
             p_item = DateTableWidgetItem(pay_date)
-            self.table_paid.setItem(row, 4, p_item)
+            self.table_paid.setItem(row, 5, p_item)
 
         self.table_paid.setSortingEnabled(True)
         # Sütun ve Ekran Optimizasyonu
         self.table_paid.auto_fit_columns()
+
+        # Dinamik Toplam Hesaplama (Özet Panel):
+        # Filtrelenmiş listedeki faturaların toplamlarını gösterecek şekilde anlık olarak güncellenir.
+        self._update_stat_cards(displayed_paid_invoices=invoices)
 
         # Kullanıcı arayüzünde durum çubuğu bildirimi
         if show_all:

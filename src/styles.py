@@ -280,4 +280,45 @@ QDialog {{
     background-color: {COLORS["bg_dark"]};
     color: {COLORS["text_primary"]};
 }}
+
+/* Windows Uyumlu Takvim Açılır Menüsü (QCalendarWidget) Stilleri */
+QCalendarWidget QWidget {{
+    background-color: #1E293B;
+    color: #F8FAFC;
+}}
+QCalendarWidget QToolButton {{
+    background-color: #0F172A;
+    color: #F8FAFC;
+    border: 1px solid {COLORS["border"]};
+    border-radius: 4px;
+    padding: 4px 8px;
+    margin: 2px;
+}}
+QCalendarWidget QToolButton:hover {{
+    background-color: {COLORS["accent_blue"]};
+}}
+QCalendarWidget QMenu {{
+    background-color: #1E293B;
+    color: #F8FAFC;
+    border: 1px solid {COLORS["border"]};
+}}
+QCalendarWidget QSpinBox {{
+    background-color: #0F172A;
+    color: #F8FAFC;
+    border: 1px solid {COLORS["border"]};
+    selection-background-color: {COLORS["accent_blue"]};
+}}
+QCalendarWidget QTableView {{
+    background-color: #0F172A;
+    selection-background-color: {COLORS["accent_blue"]};
+    selection-color: #FFFFFF;
+    gridline-color: #1E293B;
+}}
+QCalendarWidget QTableView:item:hover {{
+    background-color: #334155;
+}}
+QCalendarWidget #qt_datetimedit_calendar {{
+    background-color: #1E293B;
+    border: 1px solid {COLORS["border"]};
+}}
 """

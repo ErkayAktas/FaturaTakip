@@ -391,14 +391,106 @@ class PDFExtractor:
 
         return 0.0, "TL"
 
+    def find_tax_amounts(self, text: str) -> Tuple[float, float, str]:
+        """
+        PDF içerisinden Vergi Hariç Tutar (Mal Hizmet Toplam Tutarı / Matrah) ve
+        Hesaplanan KDV Tutarını ayrıştırır.
+        (Vergi Hariç Tutar, KDV Tutarı, Para Birimi) döner.
+        """
+        text_clean = self.clean_text_encoding(text)
+        lines = [line.strip() for line in text_clean.splitlines() if line.strip()]
+
+        tax_excluded = 0.0
+        kdv_amt = 0.0
+        currency = "TL"
+
+        # 1. Satır satır etiketli arama
+        for i, line in enumerate(lines):
+            line_up = line.upper()
+
+            # Vergi Hariç Tutar (Mal Hizmet Toplam Tutarı / KDV Matrahı)
+            if any(k in line_up for k in ["VERGİ HARİÇ", "VERGI HARIC", "MAL HİZMET TOPLAM", "MAL HIZMET TOPLAM", "KDV MATRAHI", "MATRAH"]):
+                if tax_excluded == 0.0:
+                    parts = line.split(":")
+                    if len(parts) > 1:
+                        val, cur = self.parse_amount(parts[-1])
+                        if val > 0:
+                            tax_excluded = val
+                            if cur: currency = cur
+                    if tax_excluded == 0.0 and i + 1 < len(lines):
+                        val, cur = self.parse_amount(lines[i + 1])
+                        if val > 0:
+                            tax_excluded = val
+                            if cur: currency = cur
+
+            # KDV Tutarı (Hesaplanan KDV / Toplam KDV)
+            if any(k in line_up for k in ["HESAPLANAN KDV", "KDV TUTARI", "TOPLAM KDV", "VERGİ TUTARI", "VERGI TUTARI"]):
+                if kdv_amt == 0.0:
+                    parts = line.split(":")
+                    if len(parts) > 1:
+                        val, cur = self.parse_amount(parts[-1])
+                        if val > 0:
+                            kdv_amt = val
+                            if cur: currency = cur
+                    if kdv_amt == 0.0 and i + 1 < len(lines):
+                        val, cur = self.parse_amount(lines[i + 1])
+                        if val > 0:
+                            kdv_amt = val
+                            if cur: currency = cur
+
+        # 2. Regex ile arama (fallback)
+        if tax_excluded == 0.0:
+            patterns_tax_ex = [
+                re.compile(r"(?:Vergi\s+Hariç\s+Tutar|Mal\s+Hizmet\s+Toplam\s+Tutar[ı]?|KDV\s+Matrahı)\s*[:\-\s]*([0-9\.,\s]+(?:TL|TRY|USD|EUR)?)", re.IGNORECASE),
+                re.compile(r"Ara\s+Toplam\s*[:\-\s]*([0-9\.,\s]+(?:TL|TRY|USD|EUR)?)", re.IGNORECASE),
+            ]
+            for pat in patterns_tax_ex:
+                m = pat.search(text_clean)
+                if m:
+                    val, cur = self.parse_amount(m.group(1))
+                    if val > 0:
+                        tax_excluded = val
+                        if cur: currency = cur
+                        break
+
+        if kdv_amt == 0.0:
+            patterns_kdv = [
+                re.compile(r"(?:Hesaplanan\s+KDV|KDV\s+Tutar[ı]?|Toplam\s+KDV)\s*(?:\([^\)]*\))?\s*[:\-\s]*([0-9\.,\s]+(?:TL|TRY|USD|EUR)?)", re.IGNORECASE),
+            ]
+            for pat in patterns_kdv:
+                m = pat.search(text_clean)
+                if m:
+                    val, cur = self.parse_amount(m.group(1))
+                    if val > 0:
+                        kdv_amt = val
+                        if cur: currency = cur
+                        break
+
+        # 3. Genel Toplam ile Tutarlılık Kontrolü
+        total_amt, total_cur = self.find_amount(text_clean)
+        if total_amt > 0:
+            if currency == "TL" and total_cur != "TL":
+                currency = total_cur
+
+            if tax_excluded > 0 and kdv_amt == 0:
+                kdv_amt = round(max(0.0, total_amt - tax_excluded), 2)
+            elif kdv_amt > 0 and tax_excluded == 0:
+                tax_excluded = round(max(0.0, total_amt - kdv_amt), 2)
+            elif tax_excluded == 0 and kdv_amt == 0:
+                tax_excluded = round(total_amt / 1.20, 2)
+                kdv_amt = round(total_amt - tax_excluded, 2)
+
+        return round(tax_excluded, 2), round(kdv_amt, 2), currency
+
     def process_pdf(self, pdf_path: str) -> Dict[str, Any]:
         """
         PDF dosyasını okuyup tüm fatura verilerini çıkartır:
         1. Şirket İsmi
         2. Fatura No (Unique Key)
         3. Fatura Kesim Tarihi
-        4. Ödenecek Tutar
-        5. Son Ödeme Tarihi
+        4. Vergi Hariç Tutar
+        5. KDV Tutarı
+        6. Son Ödeme Tarihi
         """
         file_name = os.path.basename(pdf_path)
         text = self.get_full_text(pdf_path)
@@ -406,7 +498,7 @@ class PDFExtractor:
         company_name = self.find_company_name(text, file_name)
         invoice_no = self.find_invoice_number(text, file_name)
         invoice_date = self.find_invoice_date(text)
-        amount, currency = self.find_amount(text)
+        tax_excluded_amount, kdv_amount, currency = self.find_tax_amounts(text)
         due_date = self.find_due_date(text)
 
         # Durum belirleme: Son Ödeme Tarihi yoksa pending_due_date
@@ -419,7 +511,8 @@ class PDFExtractor:
             "invoice_number": invoice_no,
             "company_name": company_name,
             "invoice_date": invoice_date,
-            "amount": amount,
+            "tax_excluded_amount": tax_excluded_amount,
+            "kdv_amount": kdv_amount,
             "currency": currency,
             "due_date": due_date,
             "status": status,
