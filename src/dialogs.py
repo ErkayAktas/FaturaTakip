@@ -88,9 +88,9 @@ class VadeGirisDialog(QDialog):
         info_layout.addRow("Şirket İsmi:", company_lbl)
         info_layout.addRow("Fatura No:", inv_no_lbl)
         info_layout.addRow("Kesim Tarihi:", date_lbl)
+        info_layout.addRow("Vergi Hariç Fiyat:", tax_ex_lbl)
+        info_layout.addRow("Vergi (KDV Tutarı):", kdv_lbl)
         info_layout.addRow("Toplam Fiyat (Vergiler Dahil):", total_lbl)
-        info_layout.addRow("Vergi Hariç Tutar:", tax_ex_lbl)
-        info_layout.addRow("KDV Tutarı:", kdv_lbl)
 
         layout.addWidget(info_frame)
 
@@ -255,17 +255,17 @@ class OdemeGirisDialog(QDialog):
         total_val = float(self.invoice.get("total_amount") or (tax_ex + kdv))
         cur = str(self.invoice.get("currency", "TL"))
 
-        total_lbl = QLabel(f"{total_val:,.2f} {cur}")
-        total_lbl.setStyleSheet("color: #10B981; font-weight: bold;")
-        info_layout.addRow("Toplam Fiyat (Vergiler Dahil):", total_lbl)
-
         tax_lbl = QLabel(f"{tax_ex:,.2f} {cur}")
         tax_lbl.setStyleSheet("color: #38BDF8; font-weight: bold;")
-        info_layout.addRow("Vergi Hariç Tutar:", tax_lbl)
+        info_layout.addRow("Vergi Hariç Fiyat:", tax_lbl)
 
         kdv_lbl = QLabel(f"{kdv:,.2f} {cur}")
         kdv_lbl.setStyleSheet("color: #F59E0B; font-weight: bold;")
-        info_layout.addRow("KDV Tutarı:", kdv_lbl)
+        info_layout.addRow("Vergi (KDV Tutarı):", kdv_lbl)
+
+        total_lbl = QLabel(f"{total_val:,.2f} {cur}")
+        total_lbl.setStyleSheet("color: #10B981; font-weight: bold;")
+        info_layout.addRow("Toplam Fiyat (Vergiler Dahil):", total_lbl)
 
         # Son Ödeme Tarihi (Vade) - Kullanıcı tarafından güncellenebilir
         self.due_date_edit = QDateEdit()
