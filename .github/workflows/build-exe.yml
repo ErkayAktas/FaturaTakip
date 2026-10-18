@@ -21,7 +21,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install PyQt6 customtkinter PyMuPDF pdfplumber holidays watchdog pyinstaller
+        pip install PyQt6 customtkinter PyMuPDF pdfplumber holidays watchdog pyinstaller requests
 
     - name: Build EXE with PyInstaller
       run: |
