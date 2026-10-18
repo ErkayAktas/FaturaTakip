@@ -36,6 +36,8 @@ class VadeGirisDialog(QDialog):
         self.calculated_due_date = ""
         self.selected_work_days = 0
 
+        self.delete_requested = False
+
         self.setWindowTitle("Vade Belirle - " + str(invoice.get("invoice_number", "")))
         self.setMinimumWidth(480)
         self.setup_ui()
@@ -73,16 +75,20 @@ class VadeGirisDialog(QDialog):
 
         tax_ex_val = float(self.invoice.get("tax_excluded_amount") or 0.0)
         kdv_val = float(self.invoice.get("kdv_amount") or 0.0)
+        total_val = float(self.invoice.get("total_amount") or (tax_ex_val + kdv_val))
         currency = str(self.invoice.get("currency", "TL"))
 
+        total_lbl = QLabel(f"{total_val:,.2f} {currency}")
+        total_lbl.setStyleSheet("font-weight: bold; color: #10B981; font-size: 13px;")
         tax_ex_lbl = QLabel(f"{tax_ex_val:,.2f} {currency}")
         tax_ex_lbl.setStyleSheet("font-weight: bold; color: #38BDF8; font-size: 13px;")
         kdv_lbl = QLabel(f"{kdv_val:,.2f} {currency}")
-        kdv_lbl.setStyleSheet("font-weight: bold; color: #34D399; font-size: 13px;")
+        kdv_lbl.setStyleSheet("font-weight: bold; color: #F59E0B; font-size: 13px;")
 
         info_layout.addRow("Şirket İsmi:", company_lbl)
         info_layout.addRow("Fatura No:", inv_no_lbl)
         info_layout.addRow("Kesim Tarihi:", date_lbl)
+        info_layout.addRow("Toplam Fiyat (Vergiler Dahil):", total_lbl)
         info_layout.addRow("Vergi Hariç Tutar:", tax_ex_lbl)
         info_layout.addRow("KDV Tutarı:", kdv_lbl)
 
@@ -103,7 +109,7 @@ class VadeGirisDialog(QDialog):
         spin_layout = QHBoxLayout()
         self.work_days_spin = QSpinBox()
         self.work_days_spin.setRange(1, 365)
-        self.work_days_spin.setValue(7)  # Varsayılan 7 iş günü (15'ten 7'ye düşürüldü)
+        self.work_days_spin.setValue(7)  # Varsayılan 7 iş günü
         self.work_days_spin.setStyleSheet("font-size: 15px; font-weight: bold; padding: 8px;")
         self.work_days_spin.valueChanged.connect(self._recalculate_preview)
 
@@ -139,6 +145,10 @@ class VadeGirisDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(12)
 
+        self.delete_btn = QPushButton("🗑️ Faturayı Sil")
+        self.delete_btn.setObjectName("dangerBtn")
+        self.delete_btn.clicked.connect(self._on_delete_clicked)
+
         self.cancel_btn = QPushButton("İptal")
         self.cancel_btn.setObjectName("secondaryBtn")
         self.cancel_btn.clicked.connect(self.reject)
@@ -147,12 +157,27 @@ class VadeGirisDialog(QDialog):
         self.save_btn.setObjectName("successBtn")
         self.save_btn.clicked.connect(self._on_save)
 
+        btn_layout.addWidget(self.delete_btn)
+        btn_layout.addStretch()
         btn_layout.addWidget(self.cancel_btn)
         btn_layout.addWidget(self.save_btn)
         layout.addLayout(btn_layout)
 
         # İlk hesaplamayı çalıştır
         self._recalculate_preview()
+
+    def _on_delete_clicked(self):
+        inv_no = self.invoice.get("invoice_number", "-")
+        reply = QMessageBox.question(
+            self,
+            "Faturayı Silme Onayı",
+            f"'{inv_no}' numaralı faturayı silmek ve PDF dosyasını 'Silinenler' klasörüne taşımak istediğinize emin misiniz?\n\nBu işlem faturayı veritabanından tamamen kaldıracaktır.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.delete_requested = True
+            self.accept()
 
     def _recalculate_preview(self):
         work_days = self.work_days_spin.value()
@@ -199,8 +224,9 @@ class OdemeGirisDialog(QDialog):
     def __init__(self, invoice: Dict[str, Any], parent=None):
         super().__init__(parent)
         self.invoice = invoice
+        self.delete_requested = False
         self.setWindowTitle(f"Fatura Durumu Düzenle - {invoice.get('invoice_number')}")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(480)
         self.setup_ui()
 
     def setup_ui(self):
@@ -226,8 +252,12 @@ class OdemeGirisDialog(QDialog):
         
         tax_ex = float(self.invoice.get("tax_excluded_amount", 0.0))
         kdv = float(self.invoice.get("kdv_amount", 0.0))
+        total_val = float(self.invoice.get("total_amount") or (tax_ex + kdv))
         cur = str(self.invoice.get("currency", "TL"))
-        total_calc = round(tax_ex + kdv, 2)
+
+        total_lbl = QLabel(f"{total_val:,.2f} {cur}")
+        total_lbl.setStyleSheet("color: #10B981; font-weight: bold;")
+        info_layout.addRow("Toplam Fiyat (Vergiler Dahil):", total_lbl)
 
         tax_lbl = QLabel(f"{tax_ex:,.2f} {cur}")
         tax_lbl.setStyleSheet("color: #38BDF8; font-weight: bold;")
@@ -310,7 +340,7 @@ class OdemeGirisDialog(QDialog):
         if existing_paid_amt is not None:
             self.paid_amount_spin.setValue(float(existing_paid_amt))
         else:
-            self.paid_amount_spin.setValue(total_calc)
+            self.paid_amount_spin.setValue(total_val)
 
         pay_form.addRow("Ödeme Tarihi:", self.payment_date_edit)
         pay_form.addRow("Ödenen Tutar:", self.paid_amount_spin)
@@ -321,6 +351,10 @@ class OdemeGirisDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(12)
 
+        self.delete_btn = QPushButton("🗑️ Faturayı Sil")
+        self.delete_btn.setObjectName("dangerBtn")
+        self.delete_btn.clicked.connect(self._on_delete_clicked)
+
         self.cancel_btn = QPushButton("İptal")
         self.cancel_btn.setObjectName("secondaryBtn")
         self.cancel_btn.clicked.connect(self.reject)
@@ -329,9 +363,26 @@ class OdemeGirisDialog(QDialog):
         self.save_btn.setObjectName("successBtn")
         self.save_btn.clicked.connect(self.accept)
 
+        btn_layout.addWidget(self.delete_btn)
+        btn_layout.addStretch()
         btn_layout.addWidget(self.cancel_btn)
         btn_layout.addWidget(self.save_btn)
         layout.addLayout(btn_layout)
+
+        self._toggle_payment_fields()
+
+    def _on_delete_clicked(self):
+        inv_no = self.invoice.get("invoice_number", "-")
+        reply = QMessageBox.question(
+            self,
+            "Faturayı Silme Onayı",
+            f"'{inv_no}' numaralı faturayı silmek ve PDF dosyasını 'Silinenler' klasörüne taşımak istediğinize emin misiniz?\n\nBu işlem faturayı veritabanından tamamen kaldıracaktır.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.delete_requested = True
+            self.accept()
 
         self._toggle_payment_fields()
 

@@ -1,10 +1,15 @@
+# Sürüm Kontrol Sistemi (Version Checking)
+APP_VERSION = "1.0.0"
+
+import ctypes
 import os
-import sys
+import shutil
 import subprocess
+import sys
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from PyQt6.QtCore import QDate, Qt, pyqtSlot
+from PyQt6.QtCore import QDate, Qt, QTimer, pyqtSlot
 from PyQt6.QtGui import QColor, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -31,6 +36,19 @@ from src.file_watcher import WatcherService
 from src.holiday_service import holiday_service
 from src.pdf_extractor import pdf_extractor
 from src.styles import COLORS, MAIN_STYLE_SHEET
+from src.updater import (
+    DownloadProgressDialog,
+    UpdateCheckWorker,
+    UpdatePromptDialog,
+    apply_update_and_restart,
+)
+
+# Windows Görev Çubuğu (Taskbar) Simgesi: AppUserModelID tanımlanmalıdır
+if sys.platform.startswith("win"):
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("faturatakip.lojistik.app.v1.0")
+    except Exception as e:
+        print(f"[Taskbar Icon Hatası] {e}")
 
 
 class FaturaTakipApp(QMainWindow):
@@ -38,12 +56,17 @@ class FaturaTakipApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Fatura Takip Sistemi | Lojistik & Taşıma Faturaları")
-        self.resize(1200, 780)
-        self.setMinimumSize(950, 600)
+        self.setWindowTitle(f"Fatura Takip Sistemi | Lojistik & Taşıma Faturaları (v{APP_VERSION})")
+        self.resize(1260, 800)
+        self.setMinimumSize(980, 600)
 
         # Proje / .exe çalışma dizini (PyInstaller sys._MEIPASS yerine sys.executable dizini)
         self.base_dir = get_app_base_dir()
+
+        # Windows / macOS Görev Çubuğu ve Pencere Simgesi (Taskbar Icon)
+        icon_path = os.path.join(self.base_dir, "icon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         # Veritabanı ve Dizin İzleme Servisi
         self.db = InvoiceDatabase(base_dir=self.base_dir)
@@ -52,6 +75,9 @@ class FaturaTakipApp(QMainWindow):
         self._setup_ui()
         self._setup_watcher()
         self.refresh_all_tabs()
+
+        # Uygulama açılışında arka planda sessiz güncelleme kontrolü
+        QTimer.singleShot(2000, lambda: self.check_for_updates(manual=False))
 
     def _setup_ui(self):
         # Ana widget ve layout
@@ -110,7 +136,7 @@ class FaturaTakipApp(QMainWindow):
         # Uygulama Başlığı ve İkon Metni
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
-        app_title = QLabel("📄 FATURA TAKİP SİSTEMİ")
+        app_title = QLabel(f"📄 FATURA TAKİP SİSTEMİ <span style='font-size: 11px; font-weight: normal; color: #94A3B8;'>v{APP_VERSION}</span>")
         app_title.setStyleSheet("font-size: 16px; font-weight: 800; color: #FFFFFF; letter-spacing: 0.5px;")
 
         self.watch_status_lbl = QLabel("● Klasör İzleniyor (TasımaFaturaları)")
@@ -131,7 +157,7 @@ class FaturaTakipApp(QMainWindow):
         # Butonlar
         self.btn_open_folder = QPushButton("📁 Klasörü Aç")
         self.btn_open_folder.setObjectName("secondaryBtn")
-        self.btn_open_folder.setToolTip("TasımaFaturaları klasörünü Finder'da aç")
+        self.btn_open_folder.setToolTip("TasımaFaturaları klasörünü Finder'da / Dosya Yöneticisi'nde aç")
         self.btn_open_folder.clicked.connect(self._open_invoices_folder)
         layout.addWidget(self.btn_open_folder)
 
@@ -141,23 +167,31 @@ class FaturaTakipApp(QMainWindow):
         self.btn_scan.clicked.connect(self._scan_folder_now)
         layout.addWidget(self.btn_scan)
 
+        self.btn_check_update = QPushButton("🚀 Güncellemeleri Kontrol Et")
+        self.btn_check_update.setObjectName("secondaryBtn")
+        self.btn_check_update.setToolTip("GitHub üzerinden yeni sürüm kontrolü yap")
+        self.btn_check_update.clicked.connect(lambda: self.check_for_updates(manual=True))
+        layout.addWidget(self.btn_check_update)
+
         return frame
 
     def _create_stats_bar(self) -> QWidget:
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
-        self.card_pending = StatCard("DÜZENLENECEK (EKSİK VADE)", "0", "#F59E0B")
-        self.card_all_active = StatCard("AKTİF / BEKLEYEN", "0", "#3B82F6")
+        self.card_pending = StatCard("DÜZENLENECEK (EKSİK VADE)", "0", "#F97316")
+        self.card_all_active = StatCard("AKTİF / BEKLEYEN", "0", "#60A5FA")
         self.card_due_urgent = StatCard("VADESİ GELMİŞ / GEÇMİŞ", "0", "#EF4444")
-        self.card_total_tax_excluded = StatCard("TOPLAM VERGİ HARİÇ TUTAR", "0.00 TL", "#10B981")
-        self.card_total_kdv = StatCard("TOPLAM KDV TUTARI", "0.00 TL", "#38BDF8")
+        self.card_total_amount = StatCard("TOPLAM FİYAT (VERGİLER DAHİL)", "0.00 TL", "#10B981")
+        self.card_total_tax_excluded = StatCard("TOPLAM KDV HARİÇ", "0.00 TL", "#38BDF8")
+        self.card_total_kdv = StatCard("TOPLAM KDV", "0.00 TL", "#F59E0B")
 
         layout.addWidget(self.card_pending)
         layout.addWidget(self.card_all_active)
         layout.addWidget(self.card_due_urgent)
+        layout.addWidget(self.card_total_amount)
         layout.addWidget(self.card_total_tax_excluded)
         layout.addWidget(self.card_total_kdv)
 
@@ -175,10 +209,17 @@ class FaturaTakipApp(QMainWindow):
         info_lbl.setStyleSheet("color: #94A3B8; font-size: 12px; margin-bottom: 4px;")
         layout.addWidget(info_lbl)
 
-        # Sütunlar: Şirket İsmi, Fatura No, Fatura Kesim Tarihi, Vergi Hariç Tutar, KDV Tutarı
-        headers = ["Şirket İsmi", "Fatura No", "Fatura Kesim Tarihi", "Vergi Hariç Tutar", "KDV Tutarı"]
+        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Toplam Fiyat (Vergiler Dahil), Vergi Hariç Tutar, KDV Tutarı
+        headers = [
+            "Şirket İsmi",
+            "Fatura No",
+            "Fatura Kesim Tarihi",
+            "Toplam Fiyat (Vergiler Dahil)",
+            "Vergi Hariç Tutar",
+            "KDV Tutarı",
+        ]
         self.table_pending = SortableTableWidget(headers)
-        self.table_pending.set_column_weights([0.38, 0.20, 0.14, 0.14, 0.14])
+        self.table_pending.set_column_weights([0.30, 0.16, 0.14, 0.14, 0.13, 0.13])
         self.table_pending.cellDoubleClicked.connect(self._on_pending_cell_double_clicked)
         self.table_pending.copied_to_clipboard.connect(self._show_clipboard_status)
         layout.addWidget(self.table_pending)
@@ -217,11 +258,12 @@ class FaturaTakipApp(QMainWindow):
 
         layout.addLayout(legend_layout)
 
-        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Vergi Hariç Tutar, KDV Tutarı, Son Ödeme Tarihi, Ödenme Durumu, Kalan Gün Sayısı
+        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Toplam Fiyat (Vergiler Dahil), Vergi Hariç Tutar, KDV Tutarı, Son Ödeme Tarihi, Ödenme Durumu, Kalan Gün Sayısı
         headers = [
             "Şirket İsmi",
             "Fatura No",
             "Fatura Tarihi",
+            "Toplam Fiyat (Vergiler Dahil)",
             "Vergi Hariç Tutar",
             "KDV Tutarı",
             "Son Ödeme Tarihi",
@@ -229,7 +271,7 @@ class FaturaTakipApp(QMainWindow):
             "Kalan Gün Sayısı",
         ]
         self.table_all = SortableTableWidget(headers)
-        self.table_all.set_column_weights([0.26, 0.14, 0.10, 0.13, 0.11, 0.10, 0.08, 0.08])
+        self.table_all.set_column_weights([0.22, 0.13, 0.09, 0.12, 0.11, 0.09, 0.09, 0.07, 0.08])
         self.table_all.cellDoubleClicked.connect(self._on_all_cell_double_clicked)
         self.table_all.copied_to_clipboard.connect(self._show_clipboard_status)
         layout.addWidget(self.table_all)
@@ -246,10 +288,18 @@ class FaturaTakipApp(QMainWindow):
         info_lbl.setStyleSheet("color: #F87171; font-size: 12px; font-weight: 600; margin-bottom: 4px;")
         layout.addWidget(info_lbl)
 
-        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Vergi Hariç Tutar, KDV Tutarı, Son Ödeme Tarihi
-        headers = ["Şirket İsmi", "Fatura No", "Fatura Tarihi", "Vergi Hariç Tutar", "KDV Tutarı", "Son Ödeme Tarihi"]
+        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Toplam Fiyat (Vergiler Dahil), Vergi Hariç Tutar, KDV Tutarı, Son Ödeme Tarihi
+        headers = [
+            "Şirket İsmi",
+            "Fatura No",
+            "Fatura Tarihi",
+            "Toplam Fiyat (Vergiler Dahil)",
+            "Vergi Hariç Tutar",
+            "KDV Tutarı",
+            "Son Ödeme Tarihi",
+        ]
         self.table_due = SortableTableWidget(headers)
-        self.table_due.set_column_weights([0.34, 0.16, 0.12, 0.13, 0.12, 0.13])
+        self.table_due.set_column_weights([0.28, 0.15, 0.11, 0.13, 0.12, 0.10, 0.11])
         self.table_due.cellDoubleClicked.connect(self._on_due_cell_double_clicked)
         self.table_due.copied_to_clipboard.connect(self._show_clipboard_status)
         layout.addWidget(self.table_due)
@@ -321,10 +371,18 @@ class FaturaTakipApp(QMainWindow):
 
         layout.addWidget(filter_box)
 
-        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Vergi Hariç Tutar, KDV Tutarı, Ödeme Tarihi
-        headers = ["Şirket İsmi", "Fatura No", "Fatura Tarihi", "Vergi Hariç Tutar", "KDV Tutarı", "Ödeme Tarihi"]
+        # Sütunlar: Şirket İsmi, Fatura No, Tarih, Toplam Fiyat (Vergiler Dahil), Vergi Hariç Tutar, KDV Tutarı, Ödeme Tarihi
+        headers = [
+            "Şirket İsmi",
+            "Fatura No",
+            "Fatura Tarihi",
+            "Toplam Fiyat (Vergiler Dahil)",
+            "Vergi Hariç Tutar",
+            "KDV Tutarı",
+            "Ödeme Tarihi",
+        ]
         self.table_paid = SortableTableWidget(headers)
-        self.table_paid.set_column_weights([0.34, 0.16, 0.12, 0.13, 0.12, 0.13])
+        self.table_paid.set_column_weights([0.28, 0.15, 0.11, 0.13, 0.12, 0.10, 0.11])
         self.table_paid.cellDoubleClicked.connect(self._on_paid_cell_double_clicked)
         self.table_paid.copied_to_clipboard.connect(self._show_clipboard_status)
         layout.addWidget(self.table_paid)
@@ -373,7 +431,7 @@ class FaturaTakipApp(QMainWindow):
         """
         Dinamik Toplam Hesaplama (Özet Panel):
         Ödenmiş faturalar sekmesinde bir tarih filtrelemesi uygulandığında veya
-        sayfa güncellendiğinde 'Toplam Vergi Hariç Tutar' ve 'Toplam KDV Tutarı'
+        sayfa güncellendiğinde 'Toplam Fiyat (Vergiler Dahil)', 'Toplam KDV Hariç' ve 'Toplam KDV'
         yalnızca filtrelenmiş listedeki faturaların toplamlarını anlık olarak gösterir.
         """
         pending_count = len(self.db.get_pending_invoices())
@@ -386,12 +444,21 @@ class FaturaTakipApp(QMainWindow):
         else:
             paid_invoices = self.db.get_paid_invoices()
 
+        total_price = sum(
+            float(
+                i.get("total_amount")
+                if i.get("total_amount") is not None
+                else ((i.get("tax_excluded_amount") or 0.0) + (i.get("kdv_amount") or 0.0))
+            )
+            for i in paid_invoices
+        )
         total_tax_excluded = sum(float(i.get("tax_excluded_amount") or 0.0) for i in paid_invoices)
         total_kdv = sum(float(i.get("kdv_amount") or 0.0) for i in paid_invoices)
 
         self.card_pending.set_value(str(pending_count))
         self.card_all_active.set_value(str(active_count))
         self.card_due_urgent.set_value(str(due_count))
+        self.card_total_amount.set_value(f"{total_price:,.2f} TL")
         self.card_total_tax_excluded.set_value(f"{total_tax_excluded:,.2f} TL")
         self.card_total_kdv.set_value(f"{total_kdv:,.2f} TL")
 
@@ -419,15 +486,24 @@ class FaturaTakipApp(QMainWindow):
 
             cur = str(inv.get("currency", "TL"))
 
-            # 3: Vergi Hariç Tutar
+            # 3: Toplam Fiyat (Vergiler Dahil)
+            tot_amt = float(
+                inv.get("total_amount")
+                if inv.get("total_amount") is not None
+                else ((inv.get("tax_excluded_amount") or 0.0) + (inv.get("kdv_amount") or 0.0))
+            )
+            tot_item = NumericTableWidgetItem(tot_amt, f"{tot_amt:,.2f} {cur}")
+            self.table_pending.setItem(row, 3, tot_item)
+
+            # 4: Vergi Hariç Tutar
             tax_ex = float(inv.get("tax_excluded_amount") or 0.0)
             tax_item = NumericTableWidgetItem(tax_ex, f"{tax_ex:,.2f} {cur}")
-            self.table_pending.setItem(row, 3, tax_item)
+            self.table_pending.setItem(row, 4, tax_item)
 
-            # 4: KDV Tutarı
+            # 5: KDV Tutarı
             kdv = float(inv.get("kdv_amount") or 0.0)
             kdv_item = NumericTableWidgetItem(kdv, f"{kdv:,.2f} {cur}")
-            self.table_pending.setItem(row, 4, kdv_item)
+            self.table_pending.setItem(row, 5, kdv_item)
 
         self.table_pending.setSortingEnabled(True)
         # Sütun ve Ekran Optimizasyonu
@@ -456,31 +532,40 @@ class FaturaTakipApp(QMainWindow):
             f_item = QTableWidgetItem(inv_no)
             self.table_all.setItem(row, 1, f_item)
 
-            # 2: Tarih
+            # 2: Fatura Tarihi
             d_item = DateTableWidgetItem(inv.get("invoice_date"))
             self.table_all.setItem(row, 2, d_item)
 
-            # 3: Vergi Hariç Tutar
+            # 3: Toplam Fiyat (Vergiler Dahil)
+            tot_amt = float(
+                inv.get("total_amount")
+                if inv.get("total_amount") is not None
+                else ((inv.get("tax_excluded_amount") or 0.0) + (inv.get("kdv_amount") or 0.0))
+            )
+            tot_item = NumericTableWidgetItem(tot_amt, f"{tot_amt:,.2f} {cur}")
+            self.table_all.setItem(row, 3, tot_item)
+
+            # 4: Vergi Hariç Tutar
             tax_ex = float(inv.get("tax_excluded_amount") or 0.0)
             tax_item = NumericTableWidgetItem(tax_ex, f"{tax_ex:,.2f} {cur}")
-            self.table_all.setItem(row, 3, tax_item)
+            self.table_all.setItem(row, 4, tax_item)
 
-            # 4: KDV Tutarı
+            # 5: KDV Tutarı
             kdv = float(inv.get("kdv_amount") or 0.0)
             kdv_item = NumericTableWidgetItem(kdv, f"{kdv:,.2f} {cur}")
-            self.table_all.setItem(row, 4, kdv_item)
+            self.table_all.setItem(row, 5, kdv_item)
 
-            # 5: Son Ödeme Tarihi
+            # 6: Son Ödeme Tarihi
             due_item = DateTableWidgetItem(due_date)
-            self.table_all.setItem(row, 5, due_item)
+            self.table_all.setItem(row, 6, due_item)
 
-            # 6: Ödenme Durumu
+            # 7: Ödenme Durumu
             status_text = "✓ Ödendi" if status == "paid" else "Ödenmedi"
             s_item = QTableWidgetItem(status_text)
             s_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_all.setItem(row, 6, s_item)
+            self.table_all.setItem(row, 7, s_item)
 
-            # 7: Kalan Gün Sayısı
+            # 8: Kalan Gün Sayısı
             if status == "paid":
                 kalan_item = QTableWidgetItem("Tamamlandı")
                 kalan_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -498,7 +583,7 @@ class FaturaTakipApp(QMainWindow):
                 kalan_item = QTableWidgetItem("-")
                 kalan_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            self.table_all.setItem(row, 7, kalan_item)
+            self.table_all.setItem(row, 8, kalan_item)
 
             # UYARI VE SATIR RENKLENDİRMESİ:
             # 1. Vadesine 2 günden fazla süre olan faturalar -> BEYAZ zemin
@@ -510,19 +595,14 @@ class FaturaTakipApp(QMainWindow):
 
             if status != "paid" and days_left is not None:
                 if days_left <= 0:
-                    # Kırmızı: Vadesi gelmiş / geçmiş (BUGÜN SON GÜN dahil)
                     status_type = "red"
                 elif days_left == 1:
-                    # Turuncu: Vadesine 1 gün kalan
                     status_type = "orange"
                 elif days_left == 2:
-                    # Sarı: Vadesine 2 gün kalan
                     status_type = "yellow"
                 else:
-                    # Normal: Vadesine 2 günden fazla süre olanlar -> BEYAZ ZEMİN
                     status_type = "normal"
             elif status == "paid":
-                # Ödenmiş: Yeşil
                 status_type = "paid"
             else:
                 status_type = "normal"
@@ -555,23 +635,32 @@ class FaturaTakipApp(QMainWindow):
             f_item = QTableWidgetItem(inv_no)
             self.table_due.setItem(row, 1, f_item)
 
-            # 2: Tarih
+            # 2: Fatura Tarihi
             d_item = DateTableWidgetItem(inv.get("invoice_date"))
             self.table_due.setItem(row, 2, d_item)
 
-            # 3: Vergi Hariç Tutar
+            # 3: Toplam Fiyat (Vergiler Dahil)
+            tot_amt = float(
+                inv.get("total_amount")
+                if inv.get("total_amount") is not None
+                else ((inv.get("tax_excluded_amount") or 0.0) + (inv.get("kdv_amount") or 0.0))
+            )
+            tot_item = NumericTableWidgetItem(tot_amt, f"{tot_amt:,.2f} {cur}")
+            self.table_due.setItem(row, 3, tot_item)
+
+            # 4: Vergi Hariç Tutar
             tax_ex = float(inv.get("tax_excluded_amount") or 0.0)
             tax_item = NumericTableWidgetItem(tax_ex, f"{tax_ex:,.2f} {cur}")
-            self.table_due.setItem(row, 3, tax_item)
+            self.table_due.setItem(row, 4, tax_item)
 
-            # 4: KDV Tutarı
+            # 5: KDV Tutarı
             kdv = float(inv.get("kdv_amount") or 0.0)
             kdv_item = NumericTableWidgetItem(kdv, f"{kdv:,.2f} {cur}")
-            self.table_due.setItem(row, 4, kdv_item)
+            self.table_due.setItem(row, 5, kdv_item)
 
-            # 5: Son Ödeme Tarihi
+            # 6: Son Ödeme Tarihi
             due_item = DateTableWidgetItem(inv.get("due_date"))
-            self.table_due.setItem(row, 5, due_item)
+            self.table_due.setItem(row, 6, due_item)
 
         self.table_due.setSortingEnabled(True)
         # Sütun ve Ekran Optimizasyonu
@@ -662,20 +751,29 @@ class FaturaTakipApp(QMainWindow):
             d_item = DateTableWidgetItem(inv.get("invoice_date"))
             self.table_paid.setItem(row, 2, d_item)
 
-            # 3: Vergi Hariç Tutar
+            # 3: Toplam Fiyat (Vergiler Dahil)
+            tot_amt = float(
+                inv.get("total_amount")
+                if inv.get("total_amount") is not None
+                else ((inv.get("tax_excluded_amount") or 0.0) + (inv.get("kdv_amount") or 0.0))
+            )
+            tot_item = NumericTableWidgetItem(tot_amt, f"{tot_amt:,.2f} {cur}")
+            self.table_paid.setItem(row, 3, tot_item)
+
+            # 4: Vergi Hariç Tutar
             tax_ex = float(inv.get("tax_excluded_amount") or 0.0)
             tax_item = NumericTableWidgetItem(tax_ex, f"{tax_ex:,.2f} {cur}")
-            self.table_paid.setItem(row, 3, tax_item)
+            self.table_paid.setItem(row, 4, tax_item)
 
-            # 4: KDV Tutarı
+            # 5: KDV Tutarı
             kdv = float(inv.get("kdv_amount") or 0.0)
             kdv_item = NumericTableWidgetItem(kdv, f"{kdv:,.2f} {cur}")
-            self.table_paid.setItem(row, 4, kdv_item)
+            self.table_paid.setItem(row, 5, kdv_item)
 
-            # 5: Ödeme Tarihi
+            # 6: Ödeme Tarihi
             pay_date = inv.get("payment_date") or inv.get("invoice_date")
             p_item = DateTableWidgetItem(pay_date)
-            self.table_paid.setItem(row, 5, p_item)
+            self.table_paid.setItem(row, 6, p_item)
 
         self.table_paid.setSortingEnabled(True)
         # Sütun ve Ekran Optimizasyonu
@@ -711,6 +809,53 @@ class FaturaTakipApp(QMainWindow):
         print("[Tümünü Göster Butonu] DatePicker değerleri KORUNARAK tüm ödenmiş faturalar listeleniyor...")
         self._load_tab_paid(show_all=True)
 
+    # --- FATURA SİLME VE ARŞİVLEME (MOVE & DELETE) ---
+    def _delete_and_archive_invoice(self, invoice: Dict[str, Any]):
+        """
+        Fatura Silme ve Arşivleme (Move & Delete) İşlemi:
+        - İlgili PDF dosyası TasımaFaturaları dizininden alınarak TasımaFaturaları/Silinenler
+          dizinine (klasör yoksa os.makedirs ile oluşturularak) shutil.move komutuyla taşınır.
+        - İlgili faturanın veri kaydı infos.json veritabanından tamamen silinir.
+        - Arayüzdeki Treeview/Tablo yeniden yüklenerek silinen fatura listeden kaldırılır.
+        """
+        inv_no = str(invoice.get("invoice_number", "")).strip()
+        file_path = invoice.get("file_path")
+        file_name = invoice.get("file_name") or (f"{inv_no}.pdf" if inv_no else "fatura.pdf")
+
+        # PDF'in bulunduğu dizini güvenle belirle
+        if file_path and os.path.exists(file_path):
+            source_dir = os.path.dirname(os.path.abspath(file_path))
+            actual_src_file = os.path.abspath(file_path)
+        else:
+            source_dir = os.path.abspath(self.watcher.watch_dir)
+            actual_src_file = os.path.join(source_dir, file_name)
+
+        silinenler_dir = os.path.join(source_dir, "Silinenler")
+        os.makedirs(silinenler_dir, exist_ok=True)
+        dest_path = os.path.join(silinenler_dir, os.path.basename(actual_src_file))
+
+        try:
+            if os.path.exists(actual_src_file):
+                # Hedef dizinde aynı isimde dosya varsa üzerine yazabilmek için kaldır
+                if os.path.exists(dest_path):
+                    try:
+                        os.remove(dest_path)
+                    except Exception:
+                        pass
+                shutil.move(actual_src_file, dest_path)
+                print(f"[Fatura Silme] Dosya taşındı: {actual_src_file} -> {dest_path}")
+            else:
+                print(f"[Fatura Silme] Uyarı: PDF dosyası diskte bulunamadı ({actual_src_file}), doğrudan veritabanından siliniyor.")
+        except Exception as e:
+            print(f"[Fatura Silme Hatası] Dosya taşınırken hata oluştu: {e}")
+
+        # infos.json dosyasından tamamen sil
+        self.db.delete_invoice(inv_no)
+
+        # Tabloları ve istatistik panelini yeniden yükle
+        self.refresh_all_tabs()
+        self.status_bar.showMessage(f"'{inv_no}' faturası silindi ve 'Silinenler' klasörüne taşındı.", 5000)
+
     # --- ETKİLEŞİMLER (ÇİFT TIKLAMA) ---
 
     def _on_pending_cell_double_clicked(self, row: int, col: int):
@@ -725,6 +870,9 @@ class FaturaTakipApp(QMainWindow):
 
         dialog = VadeGirisDialog(invoice, self)
         if dialog.exec():
+            if getattr(dialog, "delete_requested", False):
+                self._delete_and_archive_invoice(invoice)
+                return
             res = dialog.get_result()
             # infos.json dosyasına kaydet
             self.db.update_invoice(inv_no, res)
@@ -747,6 +895,9 @@ class FaturaTakipApp(QMainWindow):
 
         dialog = OdemeGirisDialog(invoice, self)
         if dialog.exec():
+            if getattr(dialog, "delete_requested", False):
+                self._delete_and_archive_invoice(invoice)
+                return
             res = dialog.get_result()
             self.db.update_invoice(inv_no, res)
             self.refresh_all_tabs()
@@ -764,6 +915,9 @@ class FaturaTakipApp(QMainWindow):
 
         dialog = OdemeGirisDialog(invoice, self)
         if dialog.exec():
+            if getattr(dialog, "delete_requested", False):
+                self._delete_and_archive_invoice(invoice)
+                return
             res = dialog.get_result()
             self.db.update_invoice(inv_no, res)
             self.refresh_all_tabs()
@@ -781,6 +935,9 @@ class FaturaTakipApp(QMainWindow):
 
         dialog = OdemeGirisDialog(invoice, self)
         if dialog.exec():
+            if getattr(dialog, "delete_requested", False):
+                self._delete_and_archive_invoice(invoice)
+                return
             res = dialog.get_result()
             self.db.update_invoice(inv_no, res)
             self.refresh_all_tabs()
@@ -806,6 +963,73 @@ class FaturaTakipApp(QMainWindow):
         elif current_tab_idx == 3:
             self.table_paid.filter_by_text(query, [0, 1])
 
+    # --- SÜRÜM KONTROL VE GÜNCELLEME SİSTEMİ (VERSION CHECK & AUTO-UPDATE) ---
+    def check_for_updates(self, manual: bool = False):
+        """GitHub API üzerinden en son yayınlanan Release sürümünü arka planda kontrol eder."""
+        if hasattr(self, "_update_thread") and self._update_thread and self._update_thread.isRunning():
+            if manual:
+                self.status_bar.showMessage("Güncelleme kontrolü zaten devam ediyor...", 3000)
+            return
+
+        if manual:
+            self.status_bar.showMessage("GitHub üzerinden güncellemeler kontrol ediliyor...", 4000)
+
+        self._update_thread = UpdateCheckWorker(manual=manual, parent=self)
+        self._update_thread.update_available.connect(self._on_update_available)
+        self._update_thread.no_update.connect(lambda tag: self._on_no_update(tag, manual))
+        self._update_thread.check_failed.connect(lambda err: self._on_update_check_failed(err, manual))
+        self._update_thread.start()
+
+    @pyqtSlot(dict)
+    def _on_update_available(self, release_info: dict):
+        tag_name = release_info.get("tag_name", "")
+        self.status_bar.showMessage(f"Yeni sürüm bulundu: {tag_name}", 5000)
+
+        dialog = UpdatePromptDialog(release_info, self)
+        if dialog.exec():
+            download_url = release_info.get("download_url")
+            if not download_url:
+                QMessageBox.warning(
+                    self,
+                    "İndirme Bağlantısı Bulunamadı",
+                    f"'{tag_name}' sürümü bulundu ancak doğrudan indirilebilir bir .exe dosyası eklenmemiş.",
+                )
+                return
+
+            # İndirilecek dosya konumu
+            if getattr(sys, "frozen", False):
+                exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            else:
+                exe_dir = self.base_dir
+
+            target_path = os.path.join(exe_dir, "FaturaTakip_new.exe")
+
+            # Arka Planda İndirme ve İlerleme Çubuğu (Progress Dialog)
+            prog_dialog = DownloadProgressDialog(download_url, target_path, self)
+            if prog_dialog.exec() and prog_dialog.download_completed:
+                # İndirme bitti, update.bat ile hot-swap uygulayıp yeniden başlat
+                apply_update_and_restart(prog_dialog.downloaded_file)
+
+    def _on_no_update(self, latest_tag: str, manual: bool):
+        self.status_bar.showMessage(f"Uygulamanız güncel. (Sürüm: v{APP_VERSION})", 4000)
+        if manual:
+            QMessageBox.information(
+                self,
+                "Sürüm Kontrolü",
+                f"Tebrikler! Uygulamanız en güncel sürümde.\n\nMevcut Sürüm: v{APP_VERSION}\nGitHub Son Sürüm: {latest_tag}",
+            )
+
+    def _on_update_check_failed(self, error_msg: str, manual: bool):
+        if manual:
+            self.status_bar.showMessage(f"Güncelleme kontrolü: {error_msg}", 5000)
+            QMessageBox.warning(
+                self,
+                "Güncelleme Kontrolü",
+                f"Güncellemeler kontrol edilirken bir durum oluştu:\n\n{error_msg}",
+            )
+        else:
+            print(f"[Updater Otomatik Kontrol] {error_msg}")
+
     # --- YARDIMCI BUTON İŞLEVLERİ ---
     def _open_invoices_folder(self):
         watch_path = self.watcher.watch_dir
@@ -828,7 +1052,10 @@ class FaturaTakipApp(QMainWindow):
         )
 
     def closeEvent(self, event):
-        """Uygulama kapatılırken izleyiciyi durdur."""
+        """Uygulama kapatılırken izleyiciyi ve arka plan işlerini durdur."""
+        if hasattr(self, "_update_thread") and self._update_thread and self._update_thread.isRunning():
+            self._update_thread.quit()
+            self._update_thread.wait(1000)
         self.watcher.stop()
         event.accept()
 
@@ -836,6 +1063,12 @@ class FaturaTakipApp(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(MAIN_STYLE_SHEET)
+
+    # Görev çubuğu ve uygulama ikonu
+    base_dir = get_app_base_dir()
+    icon_path = os.path.join(base_dir, "icon.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
 
     # Font ayarı
     font = QFont("-apple-system", 10)
@@ -848,3 +1081,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

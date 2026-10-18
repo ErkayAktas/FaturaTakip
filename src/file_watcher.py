@@ -26,6 +26,10 @@ class InvoiceFileHandler(FileSystemEventHandler):
         if base_name.startswith(".") or base_name.startswith("~"):
             return
 
+        # Silinenler klasöründeki arşivlenmiş dosyaları atla
+        if "Silinenler" in os.path.abspath(file_path).split(os.sep):
+            return
+
         # Dosyanın yazılmasının tamamlanması için bekleme ve kontrol
         max_attempts = 5
         for attempt in range(max_attempts):

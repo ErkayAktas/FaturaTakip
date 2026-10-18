@@ -138,11 +138,18 @@ class InvoiceDatabase:
                     self._ensure_storage_exists()
                 with open(self.json_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    items = []
                     if isinstance(data, list):
-                        return data
+                        items = data
                     elif isinstance(data, dict) and "invoices" in data:
-                        return data["invoices"]
-                    return []
+                        items = data["invoices"]
+
+                    for inv in items:
+                        if "total_amount" not in inv or inv.get("total_amount") is None:
+                            tax_ex = float(inv.get("tax_excluded_amount") or 0.0)
+                            kdv = float(inv.get("kdv_amount") or 0.0)
+                            inv["total_amount"] = round(tax_ex + kdv, 2)
+                    return items
             except (json.JSONDecodeError, OSError):
                 return []
 
@@ -209,6 +216,11 @@ class InvoiceDatabase:
             else:
                 if "status" not in invoice_data or invoice_data["status"] == "pending_due_date":
                     invoice_data["status"] = "active"
+
+            if "total_amount" not in invoice_data or invoice_data.get("total_amount") is None:
+                tax_ex = float(invoice_data.get("tax_excluded_amount") or 0.0)
+                kdv = float(invoice_data.get("kdv_amount") or 0.0)
+                invoice_data["total_amount"] = round(tax_ex + kdv, 2)
 
             if "created_at" not in invoice_data:
                 invoice_data["created_at"] = datetime.now().isoformat()
