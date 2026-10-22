@@ -5,30 +5,44 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install PyQt6 customtkinter PyMuPDF pdfplumber holidays watchdog pyinstaller dropbox
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install PyQt6 customtkinter PyMuPDF pdfplumber holidays watchdog pyinstaller dropbox
 
-    - name: Build EXE with PyInstaller
-      run: |
+      - name: Build EXE with PyInstaller
+        run: |
           pyinstaller --noconfirm --onefile --windowed --name="FaturaTakip" --icon=icon.ico main.py
 
-    - name: Upload EXE Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: FaturaTakip-EXE
-        path: dist/*.exe
+      - name: Otomatik Sürüm (Release) Yayınla
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/*.exe
+          name: Fatura Takip ${{ github.ref_name }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload EXE Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FaturaTakip-EXE
+          path: dist/*.exe

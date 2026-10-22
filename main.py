@@ -68,7 +68,7 @@ class FaturaTakipApp(QMainWindow):
         self.db = InvoiceDatabase(base_dir=self.base_dir)
         self.watcher = WatcherService(db=self.db, extractor=pdf_extractor)
 
-        # Dropbox Yedekleme ve Çift Yönlü Senkronizasyon (5ymg7fu8z3zha1n API anahtarı)
+        # Dropbox Yedekleme ve Çift Yönlü Senkronizasyon (Dropbox API erişim belirteci)
         self.dropbox_sync = DropboxSyncManager(local_json_path=self.db.json_path, parent=self)
         self.db.add_change_callback(self.dropbox_sync.trigger_instant_upload)
         self.dropbox_sync.sync_status_updated.connect(self._on_dropbox_status_updated)

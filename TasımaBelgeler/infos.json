@@ -74,8 +74,11 @@
     "file_name": "56965408542_SADIK UYANIK_EAA2026000000001.pdf",
     "file_path": "/Users/erkayaktas/Desktop/Gravity/FaturaTakip/TasımaBelgeler/TasımaFaturaları/56965408542_SADIK UYANIK_EAA2026000000001.pdf",
     "created_at": "2026-10-19T22:29:33.251076",
-    "updated_at": "2026-10-19T22:29:44.396409",
-    "id": "EAA2026000000001"
+    "updated_at": "2026-10-23T02:46:24.795507",
+    "id": "EAA2026000000001",
+    "contact_name": "",
+    "contact_phone": "",
+    "remaining_amount": null
   },
   {
     "invoice_number": "AAA2026000000073",
@@ -104,9 +107,9 @@
     "kdv_amount": 2000.0,
     "total_amount": 12000.0,
     "currency": "TL",
-    "status": "paid",
-    "payment_date": "2026-10-22",
-    "paid_amount": 12000.0,
+    "status": "active",
+    "payment_date": null,
+    "paid_amount": null,
     "due_date": "2026-10-22",
     "contact_name": "NO NAME",
     "contact_phone": "05312345678",
@@ -114,7 +117,7 @@
     "is_cash": true,
     "id": "NAKIT_A0DC8A27",
     "created_at": "2026-10-22T23:55:22.533607",
-    "updated_at": "2026-10-22T23:58:16.822452",
-    "remaining_amount": 0.0
+    "updated_at": "2026-10-23T02:46:42.160346",
+    "remaining_amount": null
   }
 ]
