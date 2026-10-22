@@ -5,8 +5,9 @@ import shutil
 import sys
 import tempfile
 import threading
+import uuid
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 def sanitize_date_str(val: Any) -> str:
@@ -120,8 +121,22 @@ class InvoiceDatabase:
         self.storage_dir = os.path.join(self.base_dir, "TasımaBelgeler")
         self.json_path = os.path.join(self.storage_dir, "infos.json")
         self.lock = threading.RLock()
+        self.change_callbacks: List[Callable[[], None]] = []
 
         self._ensure_storage_exists()
+
+    def add_change_callback(self, cb: Callable[[], None]) -> None:
+        """Veritabanı her güncellendiğinde çağrılacak geri çağırma (Dropbox anlık senkron vb.) ekler."""
+        if cb not in self.change_callbacks:
+            self.change_callbacks.append(cb)
+
+    def _notify_change(self) -> None:
+        """Kayıt sonrası tüm geri çağırma fonksiyonlarını tetikler."""
+        for cb in list(self.change_callbacks):
+            try:
+                cb()
+            except Exception as e:
+                print(f"[DB Notification Error] {e}")
 
     def _ensure_storage_exists(self) -> None:
         """TasımaBelgeler dizini ve infos.json dosyasının varlığından emin olur."""
@@ -145,6 +160,9 @@ class InvoiceDatabase:
                         items = data["invoices"]
 
                     for inv in items:
+                        # Benzersiz dahili ID güvencesi
+                        if "id" not in inv or not inv.get("id"):
+                            inv["id"] = str(inv.get("invoice_number", "")) or str(uuid.uuid4())
                         if "total_amount" not in inv or inv.get("total_amount") is None:
                             tax_ex = float(inv.get("tax_excluded_amount") or 0.0)
                             kdv = float(inv.get("kdv_amount") or 0.0)
@@ -154,7 +172,7 @@ class InvoiceDatabase:
                 return []
 
     def save_all(self, invoices: List[Dict[str, Any]]) -> bool:
-        """Kayıtları güvenli ve atomik şekilde infos.json dosyasına kaydeder."""
+        """Kayıtları güvenli ve atomik şekilde infos.json dosyasına kaydeder ve Dropbox'a anlık bildirim gönderir."""
         with self.lock:
             try:
                 temp_file = tempfile.NamedTemporaryFile(
@@ -168,51 +186,70 @@ class InvoiceDatabase:
                 os.fsync(temp_file.fileno())
                 temp_file.close()
                 shutil.move(temp_file.name, self.json_path)
+                
+                # Anlık Değişiklik Bildirimi (Dropbox Sync vb.)
+                self._notify_change()
                 return True
             except Exception as e:
                 print(f"[Database Error] Kaydetme hatası: {e}")
                 return False
 
     def is_duplicate(self, invoice_number: str) -> bool:
-        """Fatura numarasının kayıtlı olup olmadığını kontrol eder (Mükerrer kontrolü)."""
+        """Fatura numarasının kayıtlı olup olmadığını kontrol eder. 'Nakit' girişleri mükerrer sayılmaz."""
         if not invoice_number:
             return False
         clean_no = invoice_number.strip().upper()
+        if clean_no == "NAKIT":
+            return False  # Manuel nakit işlemlerinde mükerrer engeli uygulanmaz
         invoices = self.load_all()
         for inv in invoices:
             if str(inv.get("invoice_number", "")).strip().upper() == clean_no:
                 return True
         return False
 
-    def get_invoice(self, invoice_number: str) -> Optional[Dict[str, Any]]:
-        """Fatura numarasına göre faturayı bulur."""
-        if not invoice_number:
+    def get_invoice(self, identifier: str) -> Optional[Dict[str, Any]]:
+        """ID veya Fatura numarasına göre faturayı bulur."""
+        if not identifier:
             return None
-        clean_no = invoice_number.strip().upper()
+        clean_id = str(identifier).strip().upper()
         invoices = self.load_all()
         for inv in invoices:
-            if str(inv.get("invoice_number", "")).strip().upper() == clean_no:
+            if str(inv.get("id", "")).strip().upper() == clean_id:
+                return inv
+            if str(inv.get("invoice_number", "")).strip().upper() == clean_id:
                 return inv
         return None
 
     def add_invoice(self, invoice_data: Dict[str, Any]) -> bool:
-        """Yeni faturayı ekler. Mükerrer ise False döner."""
+        """Yeni faturayı veya nakit kaydını ekler. Mükerrer ise False döner."""
         inv_no = str(invoice_data.get("invoice_number", "")).strip()
         if not inv_no:
             return False
 
         with self.lock:
-            # Mükerrer kontrolü
-            invoices = self.load_all()
-            for inv in invoices:
-                if str(inv.get("invoice_number", "")).strip().upper() == inv_no.upper():
-                    return False  # Mükerrer kayıt engeli
+            # Nakit kontrolü: Nakit girişlerinde benzersiz ID üretilir
+            is_cash = invoice_data.get("is_cash", False) or inv_no.lower() == "nakit"
+            if is_cash:
+                invoice_data["invoice_number"] = "Nakit"
+                if "id" not in invoice_data or not invoice_data.get("id"):
+                    invoice_data["id"] = f"NAKIT_{uuid.uuid4().hex[:8].upper()}"
+                invoice_data["is_cash"] = True
+            else:
+                if "id" not in invoice_data or not invoice_data.get("id"):
+                    invoice_data["id"] = inv_no
+
+                # Standart faturalarda mükerrer kontrolü
+                invoices = self.load_all()
+                for inv in invoices:
+                    if str(inv.get("invoice_number", "")).strip().upper() == inv_no.upper():
+                        return False  # Mükerrer kayıt engeli
 
             # Statü kontrolü: Son ödeme tarihi yoksa Düzenlenecek Faturalar statüsü
             due_date = invoice_data.get("due_date")
             if not due_date or str(due_date).strip().lower() in ["", "none", "null"]:
                 invoice_data["due_date"] = None
-                invoice_data["status"] = "pending_due_date"
+                if invoice_data.get("status") not in ["paid", "partial"]:
+                    invoice_data["status"] = "pending_due_date"
             else:
                 if "status" not in invoice_data or invoice_data["status"] == "pending_due_date":
                     invoice_data["status"] = "active"
@@ -226,20 +263,21 @@ class InvoiceDatabase:
                 invoice_data["created_at"] = datetime.now().isoformat()
             invoice_data["updated_at"] = datetime.now().isoformat()
 
+            invoices = self.load_all()
             invoices.append(invoice_data)
             return self.save_all(invoices)
 
-    def update_invoice(self, invoice_number: str, updates: Dict[str, Any]) -> bool:
-        """Belirtilen faturayı günceller."""
-        if not invoice_number:
+    def update_invoice(self, identifier: str, updates: Dict[str, Any]) -> bool:
+        """Belirtilen faturayı ID veya Fatura No üzerinden günceller."""
+        if not identifier:
             return False
 
-        clean_no = invoice_number.strip().upper()
+        clean_id = str(identifier).strip().upper()
         invoices = self.load_all()
         found = False
 
         for i, inv in enumerate(invoices):
-            if str(inv.get("invoice_number", "")).strip().upper() == clean_no:
+            if str(inv.get("id", "")).strip().upper() == clean_id or str(inv.get("invoice_number", "")).strip().upper() == clean_id:
                 # Güncellemeleri uygula
                 invoices[i].update(updates)
                 invoices[i]["updated_at"] = datetime.now().isoformat()
@@ -250,14 +288,67 @@ class InvoiceDatabase:
             return self.save_all(invoices)
         return False
 
-    def delete_invoice(self, invoice_number: str) -> bool:
-        """Faturayı siler (kullanıcı manuel arayüzden kaldırmak isterse)."""
-        clean_no = invoice_number.strip().upper()
+    def delete_invoice(self, identifier: str) -> bool:
+        """Faturayı ID veya Fatura No üzerinden siler."""
+        clean_id = str(identifier).strip().upper()
         invoices = self.load_all()
-        filtered = [inv for inv in invoices if str(inv.get("invoice_number", "")).strip().upper() != clean_no]
+        filtered = [
+            inv for inv in invoices
+            if str(inv.get("id", "")).strip().upper() != clean_id and str(inv.get("invoice_number", "")).strip().upper() != clean_id
+        ]
         if len(filtered) != len(invoices):
             return self.save_all(filtered)
         return False
+
+    # --- İletişim Bilgileri (İsim & Numara) ve Akıllı Güncelleme Fonksiyonları ---
+
+    def update_company_contacts(self, company_name: str, contact_name: str, contact_phone: str) -> int:
+        """
+        Belirtilen firma ismine ait tüm faturaların iletişim bilgilerini (İsim ve Telefon) topluca günceller.
+        Güncellenen kayıt sayısını döner.
+        """
+        if not company_name:
+            return 0
+        clean_comp = company_name.strip().lower()
+        invoices = self.load_all()
+        count = 0
+        for inv in invoices:
+            if str(inv.get("company_name", "")).strip().lower() == clean_comp:
+                inv["contact_name"] = contact_name.strip()
+                inv["contact_phone"] = contact_phone.strip()
+                inv["updated_at"] = datetime.now().isoformat()
+                count += 1
+        if count > 0:
+            self.save_all(invoices)
+        return count
+
+    def get_company_contact(self, company_name: str) -> Tuple[str, str]:
+        """Bir firmaya ait daha önce kaydedilmiş İsim ve Telefon numarasını bulur."""
+        if not company_name:
+            return "", ""
+        clean_comp = company_name.strip().lower()
+        invoices = self.load_all()
+        for inv in invoices:
+            if str(inv.get("company_name", "")).strip().lower() == clean_comp:
+                c_name = str(inv.get("contact_name") or "").strip()
+                c_phone = str(inv.get("contact_phone") or "").strip()
+                if c_name or c_phone:
+                    return c_name, c_phone
+        return "", ""
+
+    def get_other_invoices_for_company(self, company_name: str, current_identifier: str) -> List[Dict[str, Any]]:
+        """Aynı firmaya ait diğer tüm faturaları döner (Toplu güncelleme onay kontrolü için)."""
+        if not company_name:
+            return []
+        clean_comp = company_name.strip().lower()
+        clean_id = str(current_identifier).strip().upper()
+        invoices = self.load_all()
+        return [
+            inv for inv in invoices
+            if str(inv.get("company_name", "")).strip().lower() == clean_comp
+            and str(inv.get("id", inv.get("invoice_number", ""))).strip().upper() != clean_id
+            and str(inv.get("invoice_number", "")).strip().upper() != clean_id
+        ]
 
     # --- Filtrelenmiş Liste Fonksiyonları ---
 
@@ -268,23 +359,24 @@ class InvoiceDatabase:
         for inv in invoices:
             due = inv.get("due_date")
             status = inv.get("status")
-            if status == "pending_due_date" or not due or str(due).strip().lower() in ["", "none", "null"]:
+            if (status == "pending_due_date" or not due or str(due).strip().lower() in ["", "none", "null"]) and status not in ["paid", "partial"]:
                 result.append(inv)
         return result
 
     def get_all_complete_invoices(self) -> List[Dict[str, Any]]:
-        """Sekme 2: Tüm Faturalar (Bilgileri tam olan tüm faturalar: Aktif ve Ödenmiş)."""
+        """Sekme 2: Tüm Faturalar (Bilgileri tam olan tüm faturalar: Aktif, Kısmi/Parçalı ve Ödenmiş)."""
         invoices = self.load_all()
         result = []
         for inv in invoices:
             due = inv.get("due_date")
             status = inv.get("status")
-            if due and str(due).strip().lower() not in ["", "none", "null"] and status != "pending_due_date":
+            # Vadesi girilmiş veya kısmi/ödenmiş tüm faturalar
+            if (due and str(due).strip().lower() not in ["", "none", "null"] and status != "pending_due_date") or status in ["paid", "partial"]:
                 result.append(inv)
         return result
 
     def get_due_invoices(self, reference_date: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Sekme 3: Vadesi Gelmiş Faturalar (Vadesi bugüne eşit veya geçmiş, henüz ödenmemiş olanlar)."""
+        """Sekme 3: Vadesi Gelmiş Faturalar (Vadesi bugüne eşit veya geçmiş, henüz tam ödenmemiş olanlar)."""
         ref_dt = parse_date_obj(reference_date) or datetime.now().date()
 
         invoices = self.load_all()
@@ -292,7 +384,7 @@ class InvoiceDatabase:
         for inv in invoices:
             status = str(inv.get("status", "")).strip().lower()
             due = inv.get("due_date")
-            # Ödenmemiş ve son ödeme tarihi var
+            # Tam ödenmemiş (aktif veya kısmi parçalı) ve vadesi gelmiş/geçmiş
             if status not in ["paid", "ödendi", "odendi"] and due and str(due).strip().lower() not in ["", "none", "null"] and status != "pending_due_date":
                 due_dt = parse_date_obj(due)
                 if due_dt and due_dt <= ref_dt:

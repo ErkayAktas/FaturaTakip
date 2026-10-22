@@ -66,6 +66,10 @@ class CustomInvoiceRowDelegate(QStyledItemDelegate):
         elif status_type == "paid":
             bg_color = QColor("#1D4ED8") if is_selected else QColor("#BBF7D0")
             txt_color = QColor("#86EFAC") if is_selected else QColor("#065F46")
+        elif status_type == "partial":
+            # Kısmi / Parçalı Ödeme: Belirgin Kehribar / Sıcak Altın Sarısı tonu
+            bg_color = QColor("#1D4ED8") if is_selected else QColor("#FDE68A")
+            txt_color = QColor("#FDE68A") if is_selected else QColor("#78350F")
         else:
             bg_color = QColor("#1D4ED8") if is_selected else QColor("#FFFFFF")
             txt_color = QColor("#FFFFFF") if is_selected else QColor("#0F172A")
@@ -82,7 +86,7 @@ class CustomInvoiceRowDelegate(QStyledItemDelegate):
         painter.setPen(txt_color)
 
         font = option.font
-        if is_selected or status_type in ["red", "orange", "yellow", "paid"]:
+        if is_selected or status_type in ["red", "orange", "yellow", "paid", "partial"]:
             font.setBold(True)
         painter.setFont(font)
 
@@ -357,14 +361,14 @@ class StatCard(QFrame):
         self.setObjectName("statCard")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(4)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(2)
 
         self.title_label = QLabel(title)
         self.title_label.setStyleSheet("color: #94A3B8; font-size: 11px; font-weight: 600; text-transform: uppercase;")
 
         self.value_label = QLabel(value)
-        self.value_label.setStyleSheet(f"color: {color}; font-size: 20px; font-weight: 700;")
+        self.value_label.setStyleSheet(f"color: {color}; font-size: 17px; font-weight: 700;")
 
         layout.addWidget(self.title_label)
         layout.addWidget(self.value_label)

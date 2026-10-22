@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QRadioButton,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 from src.holiday_service import holiday_service
 from src.styles import COLORS
@@ -93,6 +94,27 @@ class VadeGirisDialog(QDialog):
         info_layout.addRow("Toplam Fiyat (Vergiler Dahil):", total_lbl)
 
         layout.addWidget(info_frame)
+
+        # Firma İletişim Bilgileri (Ana Listelerde Gizli)
+        contact_box = QGroupBox("📞 Firma İletişim Bilgileri (Detay Ekranı)")
+        contact_box.setStyleSheet(
+            f"QGroupBox {{ font-weight: bold; color: #38BDF8; border: 1px solid {COLORS['border']}; border-radius: 8px; margin-top: 6px; padding: 10px; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; }}"
+        )
+        contact_layout = QFormLayout(contact_box)
+        contact_layout.setSpacing(8)
+
+        self.contact_name_edit = QLineEdit(str(self.invoice.get("contact_name") or ""))
+        self.contact_name_edit.setPlaceholderText("Yetkili Adı Soyadı")
+        self.contact_name_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+
+        self.contact_phone_edit = QLineEdit(str(self.invoice.get("contact_phone") or ""))
+        self.contact_phone_edit.setPlaceholderText("Telefon Numarası (05xx xxx xx xx)")
+        self.contact_phone_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+
+        contact_layout.addRow("İsim (Yetkili):", self.contact_name_edit)
+        contact_layout.addRow("Numara (Telefon):", self.contact_phone_edit)
+        layout.addWidget(contact_box)
 
         # İş Günü Girişi
         input_frame = QFrame()
@@ -211,31 +233,36 @@ class VadeGirisDialog(QDialog):
             "due_date": self.calculated_due_date,
             "work_days_added": self.selected_work_days,
             "status": "active",
+            "contact_name": self.contact_name_edit.text().strip(),
+            "contact_phone": self.contact_phone_edit.text().strip(),
         }
 
 
 class OdemeGirisDialog(QDialog):
     """
-    Sekme 2 ve Sekme 3 için Ödeme Durumu Belirleme ve Düzenleme Pop-up'ı.
-    - Ödenmemiş faturayı Ödendi statüsüne alma (ödeme tarihi ve tutarı girerek)
-    - Yanlış girilmiş durumları tekrar Ödenmedi (Aktif) veya düzeltilmiş tutara çevirme
+    Fatura Durumu, Ödeme ve Parçalı Ödeme Düzenleme Pop-up'ı:
+    - Tamamı Ödendi, Kısmi/Parçalı Ödeme ve Ödenmedi (Aktif) seçenekleri.
+    - Parçalı ödemede kalan bakiye canlı gösterilir ve "Kalan Bakiye İçin Yeni Son Ödeme Tarihi" seçilir.
+    - Gizli İletişim Bilgileri (İsim & Telefon) görüntülenir ve düzenlenebilir.
     """
 
     def __init__(self, invoice: Dict[str, Any], parent=None):
         super().__init__(parent)
         self.invoice = invoice
         self.delete_requested = False
-        self.setWindowTitle(f"Fatura Durumu Düzenle - {invoice.get('invoice_number')}")
-        self.setMinimumWidth(480)
+
+        inv_title = invoice.get("invoice_number") or invoice.get("id") or "Fatura"
+        self.setWindowTitle(f"Fatura Detayı ve Ödeme Durumu - {inv_title}")
+        self.setMinimumWidth(520)
         self.setup_ui()
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(16)
+        layout.setSpacing(14)
         layout.setContentsMargins(24, 20, 24, 20)
 
         # Başlık
-        title_lbl = QLabel("Fatura Ödeme Durumu ve Bilgileri")
+        title_lbl = QLabel("Fatura Detayı ve Ödeme Yönetimi")
         title_lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['accent_blue']};")
         layout.addWidget(title_lbl)
 
@@ -248,26 +275,30 @@ class OdemeGirisDialog(QDialog):
         info_layout.setSpacing(6)
 
         info_layout.addRow("Şirket İsmi:", QLabel(str(self.invoice.get("company_name", "-"))))
-        info_layout.addRow("Fatura No:", QLabel(str(self.invoice.get("invoice_number", "-"))))
+        
+        inv_no_display = str(self.invoice.get("invoice_number", "-"))
+        if self.invoice.get("is_cash"):
+            inv_no_display = "Nakit (Manuel İşlem)"
+        info_layout.addRow("Fatura / İşlem No:", QLabel(inv_no_display))
         
         tax_ex = float(self.invoice.get("tax_excluded_amount", 0.0))
         kdv = float(self.invoice.get("kdv_amount", 0.0))
-        total_val = float(self.invoice.get("total_amount") or (tax_ex + kdv))
-        cur = str(self.invoice.get("currency", "TL"))
+        self.total_val = float(self.invoice.get("total_amount") or (tax_ex + kdv))
+        self.currency = str(self.invoice.get("currency", "TL"))
 
-        tax_lbl = QLabel(f"{tax_ex:,.2f} {cur}")
+        tax_lbl = QLabel(f"{tax_ex:,.2f} {self.currency}")
         tax_lbl.setStyleSheet("color: #38BDF8; font-weight: bold;")
         info_layout.addRow("Vergi Hariç Fiyat:", tax_lbl)
 
-        kdv_lbl = QLabel(f"{kdv:,.2f} {cur}")
+        kdv_lbl = QLabel(f"{kdv:,.2f} {self.currency}")
         kdv_lbl.setStyleSheet("color: #F59E0B; font-weight: bold;")
         info_layout.addRow("Vergi (KDV Tutarı):", kdv_lbl)
 
-        total_lbl = QLabel(f"{total_val:,.2f} {cur}")
-        total_lbl.setStyleSheet("color: #10B981; font-weight: bold;")
-        info_layout.addRow("Toplam Fiyat (Vergiler Dahil):", total_lbl)
+        total_lbl = QLabel(f"{self.total_val:,.2f} {self.currency}")
+        total_lbl.setStyleSheet("color: #10B981; font-weight: bold; font-size: 14px;")
+        info_layout.addRow("Toplam Tutar:", total_lbl)
 
-        # Son Ödeme Tarihi (Vade) - Kullanıcı tarafından güncellenebilir
+        # Mevcut Son Ödeme Tarihi (Vade)
         self.due_date_edit = QDateEdit()
         self.due_date_edit.setCalendarPopup(True)
         self.due_date_edit.setDisplayFormat("dd.MM.yyyy")
@@ -282,34 +313,69 @@ class OdemeGirisDialog(QDialog):
         else:
             self.due_date_edit.setDate(QDate.currentDate())
 
-        info_layout.addRow("Son Ödeme Tarihi (Vade):", self.due_date_edit)
-
+        info_layout.addRow("Vade (Son Ödeme Tarihi):", self.due_date_edit)
         layout.addWidget(info_frame)
 
-        # Durum Seçim Grubu
+        # Gizli İletişim Bilgileri Bölümü (Sadece bu detay ekranında görüntülenir)
+        contact_box = QGroupBox("📞 Firma İletişim Bilgileri (Gizli Alan)")
+        contact_box.setStyleSheet(
+            f"QGroupBox {{ font-weight: bold; color: #38BDF8; border: 1px solid {COLORS['border']}; border-radius: 8px; padding: 10px; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; }}"
+        )
+        contact_layout = QFormLayout(contact_box)
+        contact_layout.setSpacing(8)
+
+        self.contact_name_edit = QLineEdit(str(self.invoice.get("contact_name") or ""))
+        self.contact_name_edit.setPlaceholderText("Firma Yetkilisi / İsim")
+        self.contact_name_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+
+        self.contact_phone_edit = QLineEdit(str(self.invoice.get("contact_phone") or ""))
+        self.contact_phone_edit.setPlaceholderText("Yetkili Telefon Numarası")
+        self.contact_phone_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+
+        contact_layout.addRow("Yetkili İsim:", self.contact_name_edit)
+        contact_layout.addRow("Telefon Numarası:", self.contact_phone_edit)
+        layout.addWidget(contact_box)
+
+        # Durum Seçim Grubu: 3 Seçenek (Ödenmedi, Parçalı Ödeme, Tamamı Ödendi)
         status_box = QGroupBox("Ödeme Durumu")
         status_box.setStyleSheet(f"font-weight: bold; color: {COLORS['text_primary']};")
-        status_layout = QVBoxLayout(status_box)
+        status_layout = QHBoxLayout(status_box)
+        status_layout.setSpacing(12)
 
-        self.radio_paid = QRadioButton("Ödendi")
-        self.radio_paid.setStyleSheet("color: #10B981; font-weight: bold;")
         self.radio_unpaid = QRadioButton("Ödenmedi (Aktif)")
-        self.radio_unpaid.setStyleSheet("color: #F59E0B; font-weight: bold;")
+        self.radio_unpaid.setStyleSheet("color: #F87171; font-weight: bold;")
 
-        # Mevcut durum
-        current_status = self.invoice.get("status")
-        if current_status == "paid":
+        self.radio_partial = QRadioButton("⏳ Kısmi / Parçalı Ödeme")
+        self.radio_partial.setStyleSheet("color: #F59E0B; font-weight: bold;")
+
+        self.radio_paid = QRadioButton("✓ Tamamı Ödendi")
+        self.radio_paid.setStyleSheet("color: #10B981; font-weight: bold;")
+
+        self.button_group = QButtonGroup(self)
+        self.button_group.addButton(self.radio_unpaid)
+        self.button_group.addButton(self.radio_partial)
+        self.button_group.addButton(self.radio_paid)
+
+        # Mevcut durumu seç
+        current_status = str(self.invoice.get("status", "active")).lower()
+        if current_status in ["paid", "ödendi", "odendi"]:
             self.radio_paid.setChecked(True)
+        elif current_status == "partial":
+            self.radio_partial.setChecked(True)
         else:
             self.radio_unpaid.setChecked(True)
 
-        self.radio_paid.toggled.connect(self._toggle_payment_fields)
+        self.radio_unpaid.toggled.connect(self._on_status_radio_changed)
+        self.radio_partial.toggled.connect(self._on_status_radio_changed)
+        self.radio_paid.toggled.connect(self._on_status_radio_changed)
 
-        status_layout.addWidget(self.radio_paid)
         status_layout.addWidget(self.radio_unpaid)
+        status_layout.addWidget(self.radio_partial)
+        status_layout.addWidget(self.radio_paid)
         layout.addWidget(status_box)
 
-        # Ödeme Detay Alanları
+        # Ödeme ve Parçalı Ödeme Detay Alanları
         self.payment_frame = QFrame()
         self.payment_frame.setStyleSheet(
             f"background-color: #1E293B; border: 1px solid {COLORS['border']}; border-radius: 8px; padding: 12px;"
@@ -317,7 +383,7 @@ class OdemeGirisDialog(QDialog):
         pay_form = QFormLayout(self.payment_frame)
         pay_form.setSpacing(10)
 
-        # Ödeme Tarihi
+        # 1. Ödeme Tarihi
         self.payment_date_edit = QDateEdit()
         self.payment_date_edit.setCalendarPopup(True)
         self.payment_date_edit.setDisplayFormat("dd.MM.yyyy")
@@ -331,20 +397,72 @@ class OdemeGirisDialog(QDialog):
         else:
             self.payment_date_edit.setDate(QDate.currentDate())
 
-        # Ödenen Tutar
+        # 2. Ödenen Tutar
         self.paid_amount_spin = QDoubleSpinBox()
-        self.paid_amount_spin.setRange(0.0, 999999999.0)
+        self.paid_amount_spin.setRange(0.01, 999999999.0)
         self.paid_amount_spin.setDecimals(2)
-        self.paid_amount_spin.setSuffix(f" {cur}")
-        existing_paid_amt = self.invoice.get("paid_amount")
-        if existing_paid_amt is not None:
-            self.paid_amount_spin.setValue(float(existing_paid_amt))
+        self.paid_amount_spin.setSuffix(f" {self.currency}")
+        self.paid_amount_spin.setStyleSheet("font-size: 14px; font-weight: bold; color: #10B981; padding: 6px;")
+
+        existing_paid = self.invoice.get("paid_amount")
+        if existing_paid is not None and float(existing_paid) > 0:
+            self.paid_amount_spin.setValue(float(existing_paid))
         else:
-            self.paid_amount_spin.setValue(total_val)
+            self.paid_amount_spin.setValue(self.total_val)
+
+        self.paid_amount_spin.valueChanged.connect(self._on_paid_amount_spin_changed)
 
         pay_form.addRow("Ödeme Tarihi:", self.payment_date_edit)
         pay_form.addRow("Ödenen Tutar:", self.paid_amount_spin)
 
+        # 3. Kısmi Ödeme İçin Özel Alanlar (Kalan Bakiye & Yeni Son Ödeme Tarihi)
+        self.partial_container = QWidget()
+        partial_layout = QVBoxLayout(self.partial_container)
+        partial_layout.setContentsMargins(0, 4, 0, 0)
+        partial_layout.setSpacing(8)
+
+        # Kalan Bakiye Göstergesi
+        self.remaining_card = QFrame()
+        self.remaining_card.setStyleSheet(
+            "background-color: #451A03; border: 1px solid #F59E0B; border-radius: 6px; padding: 8px;"
+        )
+        rem_layout = QHBoxLayout(self.remaining_card)
+        rem_layout.setContentsMargins(8, 6, 8, 6)
+        rem_title = QLabel("Kalan Bakiye:")
+        rem_title.setStyleSheet("font-weight: bold; color: #FDE68A; font-size: 13px;")
+        self.remaining_lbl = QLabel(f"0.00 {self.currency}")
+        self.remaining_lbl.setStyleSheet("font-weight: 800; color: #F59E0B; font-size: 14px;")
+        rem_layout.addWidget(rem_title)
+        rem_layout.addStretch()
+        rem_layout.addWidget(self.remaining_lbl)
+        partial_layout.addWidget(self.remaining_card)
+
+        # Kalan Bakiye İçin Yeni Son Ödeme Tarihi Seçicisi
+        new_due_layout = QHBoxLayout()
+        new_due_lbl = QLabel("Kalan Bakiye İçin Yeni Son Ödeme Tarihi:")
+        new_due_lbl.setStyleSheet("font-weight: bold; color: #FDE68A; font-size: 13px;")
+
+        self.new_due_date_edit = QDateEdit()
+        self.new_due_date_edit.setCalendarPopup(True)
+        self.new_due_date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.new_due_date_edit.setStyleSheet("font-weight: bold; color: #F59E0B; font-size: 13px; padding: 6px;")
+
+        # Varsayılan olarak mevcut son ödeme tarihi veya 7 gün sonrası
+        cur_due = self.invoice.get("due_date")
+        if cur_due:
+            try:
+                dt_d = datetime.strptime(str(cur_due)[:10], "%Y-%m-%d")
+                self.new_due_date_edit.setDate(QDate(dt_d.year, dt_d.month, dt_d.day))
+            except Exception:
+                self.new_due_date_edit.setDate(QDate.currentDate().addDays(7))
+        else:
+            self.new_due_date_edit.setDate(QDate.currentDate().addDays(7))
+
+        new_due_layout.addWidget(new_due_lbl)
+        new_due_layout.addWidget(self.new_due_date_edit)
+        partial_layout.addLayout(new_due_layout)
+
+        pay_form.addRow(self.partial_container)
         layout.addWidget(self.payment_frame)
 
         # Butonlar
@@ -359,7 +477,7 @@ class OdemeGirisDialog(QDialog):
         self.cancel_btn.setObjectName("secondaryBtn")
         self.cancel_btn.clicked.connect(self.reject)
 
-        self.save_btn = QPushButton("Değişiklikleri Kaydet")
+        self.save_btn = QPushButton("✓ Değişiklikleri Kaydet")
         self.save_btn.setObjectName("successBtn")
         self.save_btn.clicked.connect(self.accept)
 
@@ -369,7 +487,9 @@ class OdemeGirisDialog(QDialog):
         btn_layout.addWidget(self.save_btn)
         layout.addLayout(btn_layout)
 
-        self._toggle_payment_fields()
+        # Başlangıç durumunu uygula
+        self._on_status_radio_changed()
+        self._update_remaining_calculation()
 
     def _on_delete_clicked(self):
         inv_no = self.invoice.get("invoice_number", "-")
@@ -384,33 +504,335 @@ class OdemeGirisDialog(QDialog):
             self.delete_requested = True
             self.accept()
 
-        self._toggle_payment_fields()
+    def _on_status_radio_changed(self):
+        if self.radio_unpaid.isChecked():
+            self.payment_frame.setVisible(False)
+        elif self.radio_partial.isChecked():
+            self.payment_frame.setVisible(True)
+            self.partial_container.setVisible(True)
+            # Eğer ödenen tutar tüm faturaya eşitse kullanıcı için yarısına veya varsayılan değere ayarla
+            if abs(self.paid_amount_spin.value() - self.total_val) < 0.01:
+                half_val = round(self.total_val / 2.0, 2)
+                self.paid_amount_spin.setValue(half_val)
+            self._update_remaining_calculation()
+        elif self.radio_paid.isChecked():
+            self.payment_frame.setVisible(True)
+            self.partial_container.setVisible(False)
+            self.paid_amount_spin.setValue(self.total_val)
 
-    def _toggle_payment_fields(self):
-        is_paid = self.radio_paid.isChecked()
-        self.payment_frame.setEnabled(is_paid)
-        self.payment_frame.setVisible(is_paid)
+    def _on_paid_amount_spin_changed(self, val: float):
+        if self.radio_partial.isChecked():
+            self._update_remaining_calculation()
+        elif self.radio_paid.isChecked():
+            # Kullanıcı tam ödendi seçiliyken tutarı azaltırsa parçalı ödemeye otomatik geçiş öner
+            if val < (self.total_val - 0.01):
+                self.radio_partial.setChecked(True)
+
+    def _update_remaining_calculation(self):
+        paid = self.paid_amount_spin.value()
+        remaining = max(0.0, self.total_val - paid)
+        self.remaining_lbl.setText(f"{remaining:,.2f} {self.currency}")
 
     def get_result(self) -> Dict[str, Any]:
+        contact_name = self.contact_name_edit.text().strip()
+        contact_phone = self.contact_phone_edit.text().strip()
+
+        # Temel vade tarihi
         qdate_due = self.due_date_edit.date()
         due_date_str = f"{qdate_due.year():04d}-{qdate_due.month():02d}-{qdate_due.day():02d}"
 
         result: Dict[str, Any] = {
             "due_date": due_date_str,
+            "contact_name": contact_name,
+            "contact_phone": contact_phone,
         }
 
         if self.radio_paid.isChecked():
-            qdate = self.payment_date_edit.date()
-            pay_date_str = f"{qdate.year():04d}-{qdate.month():02d}-{qdate.day():02d}"
+            qdate_pay = self.payment_date_edit.date()
+            pay_date_str = f"{qdate_pay.year():04d}-{qdate_pay.month():02d}-{qdate_pay.day():02d}"
             result.update({
                 "status": "paid",
                 "payment_date": pay_date_str,
                 "paid_amount": round(self.paid_amount_spin.value(), 2),
+                "remaining_amount": 0.0,
             })
+        elif self.radio_partial.isChecked():
+            qdate_pay = self.payment_date_edit.date()
+            pay_date_str = f"{qdate_pay.year():04d}-{qdate_pay.month():02d}-{qdate_pay.day():02d}"
+            qdate_new_due = self.new_due_date_edit.date()
+            new_due_str = f"{qdate_new_due.year():04d}-{qdate_new_due.month():02d}-{qdate_new_due.day():02d}"
+
+            paid_val = round(self.paid_amount_spin.value(), 2)
+            rem_val = round(max(0.0, self.total_val - paid_val), 2)
+
+            if rem_val <= 0.01:
+                # Tutarın tamamı ödenmişse statüyü paid yap
+                result.update({
+                    "status": "paid",
+                    "payment_date": pay_date_str,
+                    "paid_amount": paid_val,
+                    "remaining_amount": 0.0,
+                })
+            else:
+                result.update({
+                    "status": "partial",
+                    "payment_date": pay_date_str,
+                    "paid_amount": paid_val,
+                    "remaining_amount": rem_val,
+                    # Kalan bakiye için seçilen yeni son ödeme tarihi faturanın vade tarihi olur
+                    "due_date": new_due_str,
+                    "partial_payment_date": pay_date_str,
+                })
         else:
+            # Ödenmedi (Aktif)
             result.update({
                 "status": "active",
                 "payment_date": None,
                 "paid_amount": None,
+                "remaining_amount": None,
             })
+
         return result
+
+
+class NakitGirisDialog(QDialog):
+    """
+    Manuel Nakit Girişi Pop-up'ı:
+    - PDF zorunluluğu olmaksızın sadece nakit alınan işlemlerin sisteme girilmesini sağlar.
+    - Fatura Numarası (ID) otomatik olarak 'Nakit' şeklinde atanır.
+    - Gizli İletişim Bilgileri (İsim & Telefon) eklenebilir.
+    - Vergi Hariç, KDV ve Toplam Tutar 3'lü yapısını destekler.
+    """
+
+    def __init__(self, db=None, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("💵 Manuel Nakit Girişi (PDF'siz İşlem)")
+        self.setMinimumWidth(500)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(14)
+        layout.setContentsMargins(24, 20, 24, 20)
+
+        # Başlık ve Açıklama
+        title_lbl = QLabel("💵 Manuel Nakit İşlem Girişi")
+        title_lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; color: #10B981;")
+        sub_lbl = QLabel("PDF belgesi bulunmayan doğrudan nakit tahsilatları veya ödemeleri kaydedebilirsiniz.")
+        sub_lbl.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        layout.addWidget(title_lbl)
+        layout.addWidget(sub_lbl)
+
+        # Form Kartı
+        form_frame = QFrame()
+        form_frame.setStyleSheet(
+            f"background-color: {COLORS['bg_card']}; border: 1px solid {COLORS['border']}; border-radius: 8px; padding: 14px;"
+        )
+        form_layout = QFormLayout(form_frame)
+        form_layout.setSpacing(10)
+
+        # 1. Fatura / İşlem Numarası (Sabit 'Nakit')
+        self.inv_no_edit = QLineEdit("Nakit")
+        self.inv_no_edit.setReadOnly(True)
+        self.inv_no_edit.setStyleSheet("font-weight: bold; color: #10B981; background-color: #0F172A; padding: 6px;")
+        form_layout.addRow("İşlem Türü / No:", self.inv_no_edit)
+
+        # 2. Firma İsmi
+        self.company_edit = QLineEdit()
+        self.company_edit.setPlaceholderText("İşlem Yapılan Firma İsmi (Zorunlu)")
+        self.company_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+        self.company_edit.editingFinished.connect(self._on_company_editing_finished)
+        form_layout.addRow("Firma İsmi *:", self.company_edit)
+
+        # 3. İşlem Tarihi
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.date_edit.setDate(QDate.currentDate())
+        self.date_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+        form_layout.addRow("İşlem Tarihi:", self.date_edit)
+
+        # 4. Fiyat Alanları (3'lü Yapı: Vergi Hariç, KDV, Toplam)
+        self.tax_ex_spin = QDoubleSpinBox()
+        self.tax_ex_spin.setRange(0.0, 999999999.0)
+        self.tax_ex_spin.setDecimals(2)
+        self.tax_ex_spin.setSuffix(" TL")
+        self.tax_ex_spin.setStyleSheet("color: #38BDF8; font-weight: bold; padding: 6px;")
+        self.tax_ex_spin.valueChanged.connect(self._recalc_total_from_parts)
+
+        self.kdv_spin = QDoubleSpinBox()
+        self.kdv_spin.setRange(0.0, 999999999.0)
+        self.kdv_spin.setDecimals(2)
+        self.kdv_spin.setSuffix(" TL")
+        self.kdv_spin.setStyleSheet("color: #F59E0B; font-weight: bold; padding: 6px;")
+        self.kdv_spin.valueChanged.connect(self._recalc_total_from_parts)
+
+        self.total_spin = QDoubleSpinBox()
+        self.total_spin.setRange(0.0, 999999999.0)
+        self.total_spin.setDecimals(2)
+        self.total_spin.setSuffix(" TL")
+        self.total_spin.setStyleSheet("color: #10B981; font-weight: bold; font-size: 14px; padding: 6px;")
+        self.total_spin.valueChanged.connect(self._on_total_spin_changed)
+
+        form_layout.addRow("Vergi Hariç Tutar:", self.tax_ex_spin)
+        form_layout.addRow("Vergi (KDV Tutarı):", self.kdv_spin)
+        form_layout.addRow("Toplam Fiyat (Vergiler Dahil) *:", self.total_spin)
+
+        layout.addWidget(form_frame)
+
+        # Ödeme Durumu
+        status_box = QGroupBox("Tahsilat / Ödeme Durumu")
+        status_box.setStyleSheet(f"font-weight: bold; color: {COLORS['text_primary']};")
+        status_layout = QVBoxLayout(status_box)
+
+        self.radio_cash_paid = QRadioButton("✓ Nakit Tahsil Edildi (Ödendi)")
+        self.radio_cash_paid.setStyleSheet("color: #10B981; font-weight: bold;")
+        self.radio_cash_paid.setChecked(True)
+
+        self.radio_cash_pending = QRadioButton("⏳ Nakit Bekleniyor (Vadesi Var)")
+        self.radio_cash_pending.setStyleSheet("color: #F59E0B; font-weight: bold;")
+
+        status_layout.addWidget(self.radio_cash_paid)
+        status_layout.addWidget(self.radio_cash_pending)
+
+        # Vade Tarihi Alanı (Bekleniyor seçildiğinde)
+        self.due_container = QWidget()
+        due_row = QHBoxLayout(self.due_container)
+        due_row.setContentsMargins(0, 4, 0, 0)
+        due_row.addWidget(QLabel("Nakit Vade Tarihi:"))
+        self.cash_due_date_edit = QDateEdit()
+        self.cash_due_date_edit.setCalendarPopup(True)
+        self.cash_due_date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.cash_due_date_edit.setDate(QDate.currentDate().addDays(7))
+        due_row.addWidget(self.cash_due_date_edit)
+        self.due_container.setVisible(False)
+
+        self.radio_cash_pending.toggled.connect(lambda checked: self.due_container.setVisible(checked))
+        status_layout.addWidget(self.due_container)
+
+        layout.addWidget(status_box)
+
+        # Gizli İletişim Bilgileri (İsim ve Telefon)
+        contact_box = QGroupBox("📞 Firma İletişim Bilgileri (Gizli Alan)")
+        contact_box.setStyleSheet(
+            f"QGroupBox {{ font-weight: bold; color: #38BDF8; border: 1px solid {COLORS['border']}; border-radius: 8px; padding: 10px; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; }}"
+        )
+        contact_layout = QFormLayout(contact_box)
+        contact_layout.setSpacing(8)
+
+        self.contact_name_edit = QLineEdit()
+        self.contact_name_edit.setPlaceholderText("Yetkili Adı Soyadı")
+        self.contact_name_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+
+        self.contact_phone_edit = QLineEdit()
+        self.contact_phone_edit.setPlaceholderText("Telefon Numarası (05xx xxx xx xx)")
+        self.contact_phone_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+
+        contact_layout.addRow("Yetkili İsim:", self.contact_name_edit)
+        contact_layout.addRow("Telefon Numarası:", self.contact_phone_edit)
+        layout.addWidget(contact_box)
+
+        # Not / Açıklama
+        self.notes_edit = QLineEdit()
+        self.notes_edit.setPlaceholderText("İşlem açıklaması veya not (Opsiyonel)")
+        self.notes_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+        layout.addWidget(self.notes_edit)
+
+        # Butonlar
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
+
+        self.cancel_btn = QPushButton("İptal")
+        self.cancel_btn.setObjectName("secondaryBtn")
+        self.cancel_btn.clicked.connect(self.reject)
+
+        self.save_btn = QPushButton("✓ Nakit İşlemi Kaydet")
+        self.save_btn.setObjectName("successBtn")
+        self.save_btn.clicked.connect(self._on_save)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.cancel_btn)
+        btn_layout.addWidget(self.save_btn)
+        layout.addLayout(btn_layout)
+
+    def _recalc_total_from_parts(self):
+        tax_ex = self.tax_ex_spin.value()
+        kdv = self.kdv_spin.value()
+        self.total_spin.blockSignals(True)
+        self.total_spin.setValue(round(tax_ex + kdv, 2))
+        self.total_spin.blockSignals(False)
+
+    def _on_total_spin_changed(self, total: float):
+        if self.tax_ex_spin.value() == 0.0 and self.kdv_spin.value() == 0.0:
+            self.tax_ex_spin.blockSignals(True)
+            self.tax_ex_spin.setValue(total)
+            self.tax_ex_spin.blockSignals(False)
+
+    def _on_company_editing_finished(self):
+        comp = self.company_edit.text().strip()
+        if comp and self.db:
+            # Daha önce kayıtlı iletişim bilgisi varsa getir
+            c_name, c_phone = self.db.get_company_contact(comp)
+            if c_name and not self.contact_name_edit.text().strip():
+                self.contact_name_edit.setText(c_name)
+            if c_phone and not self.contact_phone_edit.text().strip():
+                self.contact_phone_edit.setText(c_phone)
+
+    def _on_save(self):
+        comp = self.company_edit.text().strip()
+        if not comp:
+            QMessageBox.warning(self, "Eksik Alan", "Lütfen bir firma ismi giriniz.")
+            self.company_edit.setFocus()
+            return
+
+        if self.total_spin.value() <= 0:
+            QMessageBox.warning(self, "Eksik Tutar", "Lütfen geçerli bir toplam tutar giriniz.")
+            self.total_spin.setFocus()
+            return
+
+        self.accept()
+
+    def get_result(self) -> Dict[str, Any]:
+        qdate = self.date_edit.date()
+        date_str = f"{qdate.year():04d}-{qdate.month():02d}-{qdate.day():02d}"
+
+        tax_ex = round(self.tax_ex_spin.value(), 2)
+        kdv = round(self.kdv_spin.value(), 2)
+        total = round(self.total_spin.value(), 2)
+
+        if tax_ex == 0.0 and kdv == 0.0:
+            tax_ex = total
+
+        is_paid = self.radio_cash_paid.isChecked()
+        if is_paid:
+            status = "paid"
+            pay_date = date_str
+            due_date = date_str
+            paid_amt = total
+        else:
+            status = "active"
+            pay_date = None
+            paid_amt = None
+            q_due = self.cash_due_date_edit.date()
+            due_date = f"{q_due.year():04d}-{q_due.month():02d}-{q_due.day():02d}"
+
+        return {
+            "invoice_number": "Nakit",
+            "company_name": self.company_edit.text().strip(),
+            "invoice_date": date_str,
+            "tax_excluded_amount": tax_ex,
+            "kdv_amount": kdv,
+            "total_amount": total,
+            "currency": "TL",
+            "status": status,
+            "payment_date": pay_date,
+            "paid_amount": paid_amt,
+            "due_date": due_date,
+            "contact_name": self.contact_name_edit.text().strip(),
+            "contact_phone": self.contact_phone_edit.text().strip(),
+            "notes": self.notes_edit.text().strip(),
+            "is_cash": True,
+        }
+

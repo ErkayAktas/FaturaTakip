@@ -49,12 +49,26 @@ QFrame#statCard {{
     background-color: {COLORS["bg_card"]};
     border: 1px solid {COLORS["border"]};
     border-radius: 8px;
-    padding: 12px;
+    padding: 8px 10px;
 }}
 
 QFrame#statCard:hover {{
     border-color: {COLORS["border_light"]};
     background-color: #232F45;
+}}
+
+/* İki Ayrı Özet Bilgi Grubu / Çerçeveleri */
+QFrame#summaryFrameGeneral {{
+    background-color: #172033;
+    border: 1px solid #2B3A55;
+    border-radius: 8px;
+}}
+
+QFrame#summaryFrameFiltered {{
+    background-color: #0E1A2E;
+    border: 1px solid #1E3A5F;
+    border-left: 4px solid #38BDF8;
+    border-radius: 8px;
 }}
 
 /* Sekmeler (QTabWidget) */
