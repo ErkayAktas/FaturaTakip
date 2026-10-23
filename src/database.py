@@ -391,6 +391,16 @@ class InvoiceDatabase:
                     result.append(inv)
         return result
 
+    def get_unpaid_invoices(self) -> List[Dict[str, Any]]:
+        """Ödenmemiş Faturalar (Durumu 'paid', 'ödendi' veya 'odendi' olmayan tüm faturalar: Aktif, Kısmi, Vadesi Gelmiş/Gelecek)."""
+        invoices = self.load_all()
+        result = []
+        for inv in invoices:
+            status = str(inv.get("status", "")).strip().lower()
+            if status not in ["paid", "ödendi", "odendi"]:
+                result.append(inv)
+        return result
+
     def get_paid_invoices(
         self,
         start_date: Any = None,

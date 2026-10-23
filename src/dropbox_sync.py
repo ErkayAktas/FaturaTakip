@@ -16,22 +16,11 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DROPBOX_KEY = (
-    "sl.u.AG3g-7ss5CP0f9Qx1ouhhKrd-5-zkk7ooapcrUumJaic9uUC6LrupF1Q15blXRIyrPpvs-AVssoTNYySa5VyYjgNjT2zG7MgxV8KvtfB4JJPI"
-    "2qFbS2Bw9a_jTWSTOgURWn33LxlC07D7qjSaZgZujFo15oNbefwwK0aqcnb0QwZ07KI_PbGLHHDv8Qvl9ZSqAx7Cw3IXzTDkYGHk4xYIzhUpXiG"
-    "gM8OU2bPhPYqluht1SBqL3Ebc5cMgG7_DG7sFbr3XY3IifS_den_wphfErNOJ97tsPbpS-ianDqtjakpG8botkFaX07PmVvsGRDHGgGOvuPvgagd"
-    "TCfrFHZU-PEJSl0ugz0G2dG4vvP4KiNKuEUfHIJd4F-jqVut2eSvTwLeHwTIRU_KF8e6Op6kR0_UPm9sSboE0OqtdJjEdZ1AH0ZbR_Oxo2nKf_U-"
-    "l4ZfZv0_TaPETTK_LOSSoUKRbXr1Fpov6mJRBYoxrLkOzXTeN166xPWxQzwZuT10t3bI5vhbdDgmtQm2KVsfMIAGbYshlmv_MKce_ZZVMmehHHkB"
-    "24PDe3cW0_uN4-sFPrpKoVg92SEH_OzbR0eCxmBuThMTMtXZGZ3-3eP0Kj5UHCXOPpGgZw_b8nWSHdbEZ8LG0UbrdJws9dFVYzcBt2Q9tkxexYu"
-    "73qu-0hWF16_ot8ZAd6wC5jPAJod2CHXYgrvkuyXq8dOr5fQ3L9CsYX6vXcpKUkKRy8AsUpDVxKfJ24wA3TX0ek7-2NugdpQmrWX6hM0eBlD1X5"
-    "Zj2Tuzv-lb40Le9Btv-mMplooL5jcwB5HvUyoTP2oYrAdK3st9Z4Vcrylzp8qUYsecxme4oB3ms4hyLfpGbljYUeAuFEgyXOFLALdscpITvlZ5mZ"
-    "y4ZBHDyrN_rqtAg2KsBjfHDqZouh413rNkgc9Owj0584_71-wyeo487zDyMhKA1nibOCrnLw2wv91XpWbsUiFw0hSjEnhj6XPIoXjdykYH1nHiD"
-    "3_nxQXGkz5kWNw-D3-4fcFN1ukKf3V6qYy4IenV0j8H-tNzHe-iJeKI36E0mrtGjkLwi5JkWrgzhlCwq-2x9USz1cJ9gexLtxIz0IDWqdJoTMOe"
-    "I0aJAZw0SHXtahLvY68SphX9p6LDdvmRMnIkIuo-QWa9Bw0F-8iTQxUleXyj13Trnska4Rbt3DWwozo4L6fG5AGLxbcp_V8U_4cYQ-NMz0KgGqP"
-    "66xjYQy8UPW74Ml3LHqzH4NAVSPa6reQNFSpwWWH-5DA7E41u1C7ZEBy1bQxs9WBkbDZTHOCB094wZIZmXpyeWiVettZIA4wL6WWxD0st6RqWE4"
-    "p-007lXI9Uzr4Jz6YEXr20j8is_nFQP_LRtipHvtmLslTEcgWfDaOq6bB3_trQu3E7nJQ5-q1yDhcoi4xpQjsGqtMev7OEEBuy4KEquq5KqhXM0"
-    "6t-TUDytL86bF9mA2kKZmK6pUe9GFOcIMWY1-kvI5uz75Vg21hq"
-)
+DROPBOX_APP_KEY = "5ymg7fu8z3zha1n"
+DROPBOX_APP_SECRET = "lly1tk6ue4238cc"
+DROPBOX_REFRESH_TOKEN = "0tfxdj_QbjQAAAAAAAAAAesK-vT29IUt25alSxa5SYqNb7t2GXnMARJdeIfdaQhi"
+DEFAULT_DROPBOX_KEY = DROPBOX_APP_KEY
+
 REMOTE_INFOS_PATH = "/FaturaTakip/infos.json"
 REMOTE_SESSIONS_PATH = "/FaturaTakip/sessions.json"
 AUTO_SYNC_INTERVAL_SECONDS = 30
@@ -41,7 +30,7 @@ SESSION_TIMEOUT_SECONDS = 90  # 90 saniyeden uzun süre heartbeat vermeyen kapan
 class DropboxSyncManager(QObject):
     """
     Dropbox Yedekleme, Çift Yönlü Senkronizasyon ve Aktif Oturum Yöneticisi:
-    - Dropbox API erişim belirteci (OAuth2 token) ile entegrasyon sağlar.
+    - Dropbox app_key, app_secret ve oauth2_refresh_token ile kalıcı ve otomatik yenilenen entegrasyon sağlar.
     - Başlangıç Mantığı: Dropbox'ta infos.json varsa bilgisayara indirir, yoksa bilgisayardakini Dropbox'a yükler.
     - Anlık Yükleme: Veritabanında bir değişiklik yapıldığında (save_all) anında Dropbox'a yükler.
     - Auto-Sync & Canlı Sayaç: 30 saniyede bir geriye doğru sayar (sync_countdown_tick sinyali) ve buluttan çeker.
@@ -57,11 +46,22 @@ class DropboxSyncManager(QObject):
     # Aktif Oturum Sayısı Sinyali: (oturum_sayisi)
     active_sessions_updated = pyqtSignal(int)
 
-    def __init__(self, local_json_path: str, api_key: str = DEFAULT_DROPBOX_KEY, parent=None):
+    def __init__(
+        self,
+        local_json_path: str,
+        app_key: str = DROPBOX_APP_KEY,
+        app_secret: str = DROPBOX_APP_SECRET,
+        refresh_token: str = DROPBOX_REFRESH_TOKEN,
+        parent=None,
+        api_key: Optional[str] = None
+    ):
         super().__init__(parent)
         self.local_json_path = os.path.abspath(local_json_path)
         self.storage_dir = os.path.dirname(self.local_json_path)
-        self.api_key = api_key
+        self.app_key = app_key
+        self.app_secret = app_secret
+        self.refresh_token = refresh_token
+        self.api_key = api_key or app_key
         self.remote_path = REMOTE_INFOS_PATH
         self.remote_sessions_path = REMOTE_SESSIONS_PATH
 
@@ -80,8 +80,12 @@ class DropboxSyncManager(QObject):
         atexit.register(self._on_process_exit)
 
     def get_client(self) -> dropbox.Dropbox:
-        """Dropbox istemcisi oluşturur."""
-        return dropbox.Dropbox(oauth2_access_token=self.api_key)
+        """Dropbox istemcisi oluşturur (oauth2_refresh_token ile süresi bitmeyen bağlantı)."""
+        return dropbox.Dropbox(
+            app_key=self.app_key,
+            app_secret=self.app_secret,
+            oauth2_refresh_token=self.refresh_token
+        )
 
     def start(self):
         """Senkronizasyon servisini ve canlı oturum takip döngüsünü başlatır."""

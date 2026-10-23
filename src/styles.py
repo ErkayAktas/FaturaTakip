@@ -295,6 +295,15 @@ QDialog {{
     color: {COLORS["text_primary"]};
 }}
 
+/* Scroll Area */
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+QScrollArea > QWidget > QWidget {{
+    background: transparent;
+}}
+
 /* Windows Uyumlu Takvim Açılır Menüsü (QCalendarWidget) Stilleri */
 QCalendarWidget QWidget {{
     background-color: #1E293B;

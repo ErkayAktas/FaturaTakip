@@ -2,6 +2,7 @@ from datetime import date, datetime
 from typing import Any, Dict, Optional
 from PyQt6.QtCore import QDate, Qt
 from PyQt6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QCalendarWidget,
     QDateEdit,
@@ -16,6 +17,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -24,7 +26,51 @@ from src.holiday_service import holiday_service
 from src.styles import COLORS
 
 
-class VadeGirisDialog(QDialog):
+class BaseResponsiveDialog(QDialog):
+    """
+    Dinamik Pop-up Yüksekliği ve Scrollbar Desteği:
+    - Hiçbir açılır pencerenin (dialog, detay veya düzenleme ekranı) yüksekliğinin
+      fiziksel ekran yüksekliğini aşmasına izin vermez.
+    - İçerik ekranın %80'ini aşıyorsa pencereyi maksimum ekran yüksekliğine
+      (ekranın %80'ine) sabitler.
+    - İç kısımdaki verilere dikey kaydırma çubuğu (QScrollArea) eklenerek
+      tüm içerik ve butonlar eksiksiz ve konforlu şekilde görüntülenir.
+    """
+
+    def __init__(self, parent=None, max_screen_ratio: float = 0.80):
+        super().__init__(parent)
+        self.max_screen_ratio = max_screen_ratio
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._enforce_dynamic_screen_bounds()
+
+    def _enforce_dynamic_screen_bounds(self):
+        screen = None
+        if self.parentWidget() and hasattr(self.parentWidget(), "screen"):
+            screen = self.parentWidget().screen()
+        if not screen:
+            screen = QApplication.primaryScreen()
+        if not screen and hasattr(self, "screen"):
+            screen = self.screen()
+
+        if screen:
+            avail_geo = screen.availableGeometry()
+            max_allowed_h = int(avail_geo.height() * self.max_screen_ratio)
+            max_allowed_w = int(avail_geo.width() * 0.92)
+
+            self.setMaximumHeight(max_allowed_h)
+            self.setMaximumWidth(max_allowed_w)
+
+            hint_h = self.sizeHint().height()
+            current_h = self.height()
+            target_h = max(hint_h, current_h)
+
+            if target_h > max_allowed_h:
+                self.resize(self.width(), max_allowed_h)
+
+
+class VadeGirisDialog(BaseResponsiveDialog):
     """
     Sekme 1 için Vade (İş Günü) Giriş Pop-up'ı.
     Kullanıcı iş günü girdikçe Türkiye resmi tatilleri ve hafta sonları
@@ -44,9 +90,21 @@ class VadeGirisDialog(QDialog):
         self.setup_ui()
 
     def setup_ui(self):
-        layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setSpacing(8)
+        root_layout.setContentsMargins(16, 16, 16, 12)
+
+        # Kaydırılabilir Alan (QScrollArea)
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         layout.setSpacing(16)
-        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setContentsMargins(8, 6, 8, 6)
 
         # Başlık ve Bilgi Kutusu
         title_lbl = QLabel("Vade ve Son Ödeme Tarihi Belirleme")
@@ -163,8 +221,13 @@ class VadeGirisDialog(QDialog):
         input_layout.addWidget(self.preview_box)
         layout.addWidget(input_frame)
 
-        # Butonlar
-        btn_layout = QHBoxLayout()
+        scroll_area.setWidget(content_widget)
+        root_layout.addWidget(scroll_area, 1)
+
+        # Sabit Alt Butonlar
+        btn_frame = QFrame()
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(8, 4, 8, 4)
         btn_layout.setSpacing(12)
 
         self.delete_btn = QPushButton("🗑️ Faturayı Sil")
@@ -183,7 +246,7 @@ class VadeGirisDialog(QDialog):
         btn_layout.addStretch()
         btn_layout.addWidget(self.cancel_btn)
         btn_layout.addWidget(self.save_btn)
-        layout.addLayout(btn_layout)
+        root_layout.addWidget(btn_frame)
 
         # İlk hesaplamayı çalıştır
         self._recalculate_preview()
@@ -238,7 +301,7 @@ class VadeGirisDialog(QDialog):
         }
 
 
-class OdemeGirisDialog(QDialog):
+class OdemeGirisDialog(BaseResponsiveDialog):
     """
     Fatura Durumu, Ödeme ve Parçalı Ödeme Düzenleme Pop-up'ı:
     - Tamamı Ödendi, Kısmi/Parçalı Ödeme ve Ödenmedi (Aktif) seçenekleri.
@@ -257,9 +320,21 @@ class OdemeGirisDialog(QDialog):
         self.setup_ui()
 
     def setup_ui(self):
-        layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setSpacing(8)
+        root_layout.setContentsMargins(16, 16, 16, 12)
+
+        # Kaydırılabilir Alan (QScrollArea)
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         layout.setSpacing(14)
-        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setContentsMargins(8, 6, 8, 6)
 
         # Başlık
         title_lbl = QLabel("Fatura Detayı ve Ödeme Yönetimi")
@@ -465,8 +540,13 @@ class OdemeGirisDialog(QDialog):
         pay_form.addRow(self.partial_container)
         layout.addWidget(self.payment_frame)
 
-        # Butonlar
-        btn_layout = QHBoxLayout()
+        scroll_area.setWidget(content_widget)
+        root_layout.addWidget(scroll_area, 1)
+
+        # Sabit Alt Butonlar
+        btn_frame = QFrame()
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(8, 4, 8, 4)
         btn_layout.setSpacing(12)
 
         self.delete_btn = QPushButton("🗑️ Faturayı Sil")
@@ -485,7 +565,7 @@ class OdemeGirisDialog(QDialog):
         btn_layout.addStretch()
         btn_layout.addWidget(self.cancel_btn)
         btn_layout.addWidget(self.save_btn)
-        layout.addLayout(btn_layout)
+        root_layout.addWidget(btn_frame)
 
         # Başlangıç durumunu uygula
         self._on_status_radio_changed()
@@ -595,7 +675,7 @@ class OdemeGirisDialog(QDialog):
         return result
 
 
-class NakitGirisDialog(QDialog):
+class NakitGirisDialog(BaseResponsiveDialog):
     """
     Manuel Nakit Girişi Pop-up'ı:
     - PDF zorunluluğu olmaksızın sadece nakit alınan işlemlerin sisteme girilmesini sağlar.
@@ -612,9 +692,21 @@ class NakitGirisDialog(QDialog):
         self.setup_ui()
 
     def setup_ui(self):
-        layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setSpacing(8)
+        root_layout.setContentsMargins(16, 16, 16, 12)
+
+        # Kaydırılabilir Alan (QScrollArea)
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         layout.setSpacing(14)
-        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setContentsMargins(8, 6, 8, 6)
 
         # Başlık ve Açıklama
         title_lbl = QLabel("💵 Manuel Nakit İşlem Girişi")
@@ -740,8 +832,13 @@ class NakitGirisDialog(QDialog):
         self.notes_edit.setStyleSheet("padding: 6px; font-size: 13px;")
         layout.addWidget(self.notes_edit)
 
-        # Butonlar
-        btn_layout = QHBoxLayout()
+        scroll_area.setWidget(content_widget)
+        root_layout.addWidget(scroll_area, 1)
+
+        # Sabit Alt Butonlar
+        btn_frame = QFrame()
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(8, 4, 8, 4)
         btn_layout.setSpacing(12)
 
         self.cancel_btn = QPushButton("İptal")
@@ -755,7 +852,7 @@ class NakitGirisDialog(QDialog):
         btn_layout.addStretch()
         btn_layout.addWidget(self.cancel_btn)
         btn_layout.addWidget(self.save_btn)
-        layout.addLayout(btn_layout)
+        root_layout.addWidget(btn_frame)
 
     def _recalc_total_from_parts(self):
         tax_ex = self.tax_ex_spin.value()

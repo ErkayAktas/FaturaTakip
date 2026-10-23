@@ -3,7 +3,8 @@ import os
 import subprocess
 import sys
 import threading
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict, List, Optional
 
 import requests
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
@@ -22,7 +23,7 @@ from src.database import get_app_base_dir
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "v1.0.5"
 CURRENT_VERSION = f"v{APP_VERSION}"
 
 
@@ -46,11 +47,88 @@ def get_github_token() -> str:
     return ""
 
 
+def is_newer_version(current: str, latest: str) -> bool:
+    """Sürüm karşılaştırma fonksiyonu (SemVer uyumlu)."""
+    c_str = current.lower().lstrip("v").strip()
+    l_str = latest.lower().lstrip("v").strip()
+    try:
+        c_parts = [int(x) for x in c_str.split(".")]
+        l_parts = [int(x) for x in l_str.split(".")]
+        max_len = max(len(c_parts), len(l_parts))
+        c_parts += [0] * (max_len - len(c_parts))
+        l_parts += [0] * (max_len - len(l_parts))
+        return l_parts > c_parts
+    except Exception:
+        return l_str > c_str
+
+
+def cleanup_old_files(app_dir: Optional[str] = None) -> List[str]:
+    """
+    Uygulama ilk açılışında dizinde kalan eski .old uzantılı dosyaları bulup temizler.
+    PyInstaller --onefile yapısında önceki güncellemeden kalan .old dosyalarını temizlemek için kullanılır.
+    """
+    if not app_dir:
+        is_frozen = getattr(sys, "frozen", False)
+        if is_frozen:
+            app_dir = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            app_dir = get_app_base_dir()
+
+    cleaned_files = []
+    if not os.path.exists(app_dir):
+        return cleaned_files
+
+    try:
+        for entry in os.listdir(app_dir):
+            if entry.lower().endswith(".old") or entry.lower().endswith(".old.exe"):
+                file_path = os.path.join(app_dir, entry)
+                if os.path.isfile(file_path):
+                    try:
+                        os.remove(file_path)
+                        cleaned_files.append(file_path)
+                        logger.info(f"Eski sürüm dosyası temizlendi: {file_path}")
+                    except Exception as e:
+                        logger.warning(f"Eski dosya temizlenemedi ({file_path}): {e}")
+    except Exception as e:
+        logger.error(f"Eski dosyalar taranırken hata: {e}")
+
+    return cleaned_files
+
+
+def generate_update_bat_script(target_exe_name: str, temp_exe_name: str) -> str:
+    """Windows icin guvenli dosya degisimi ve yeniden baslatma .bat betigi olusturur."""
+    return f"""@echo off
+chcp 65001 > nul
+
+:: 1. Eski uygulamanin sonlanmasi icin bekle
+timeout /t 1 /nobreak > nul 2>&1 || ping 127.0.0.1 -n 2 > nul
+
+:: 2. Calisma dizinine gec
+cd /d "%~dp0"
+
+:: 3. Eger Python seviyesinde dosya degisimi henuz yapilmamissa guvence olarak yap
+if exist "{temp_exe_name}" (
+    if exist "{target_exe_name}" (
+        if exist "{target_exe_name}.old" del /f /q "{target_exe_name}.old" > nul 2>&1
+        ren "{target_exe_name}" "{target_exe_name}.old" > nul 2>&1
+    )
+    ren "{temp_exe_name}" "{target_exe_name}" > nul 2>&1
+)
+
+:: 4. Yeni surumu baslat
+start "" "{target_exe_name}"
+
+:: 5. updater.bat betigini temizle
+del "%~f0" > nul 2>&1
+"""
+
+
 class UpdateProgressBarDialog(QDialog):
     """İndirme sürecini görselleştiren Progress Bar penceresi."""
 
     def __init__(self, parent_widget: Optional[QWidget] = None):
-        super().__init__(parent_widget)
+        actual_parent = parent_widget if isinstance(parent_widget, QWidget) else None
+        super().__init__(actual_parent)
         self.setWindowTitle("Güncelleme İndiriliyor")
         self.setFixedSize(400, 150)
         self.setModal(True)
@@ -112,8 +190,9 @@ class UpdateProgressBarDialog(QDialog):
 
 class AutoUpdater:
     """
-    Sipariş Takip (APK-STU) projesindeki güncelleme altyapısını referans alan,
     GitHub Releases tabanlı otomatik güncelleme sınıfı.
+    PyInstaller --onefile yapısına uygun kendini güncelleme, .old yeniden adlandırma
+    ve açılışta eski dosyaları temizleme desteğine sahiptir.
     """
 
     def __init__(self, parent_window):
@@ -127,6 +206,19 @@ class AutoUpdater:
         self.progress_win = None
         self.is_update_available = False
         self.latest_release_data = None
+
+    @property
+    def parent_widget(self) -> Optional[QWidget]:
+        return self.parent if isinstance(self.parent, QWidget) else None
+
+    @classmethod
+    def cleanup_old_files(cls, app_dir: Optional[str] = None) -> List[str]:
+        """Uygulama açılışında dizinde kalan eski .old uzantılı dosyaları bulup temizler."""
+        return cleanup_old_files(app_dir)
+
+    def is_newer_version(self, current: str, latest: str) -> bool:
+        """Sürüm karşılaştırma fonksiyonu."""
+        return is_newer_version(current, latest)
 
     def check_for_updates(self, silent_if_latest: bool = True):
         """
@@ -169,7 +261,7 @@ class AutoUpdater:
                         QTimer.singleShot(
                             0,
                             lambda: QMessageBox.information(
-                                self.parent,
+                                self.parent_widget,
                                 "Güncelleme",
                                 f"Uygulamanız güncel.\nMevcut Sürüm: {CURRENT_VERSION}",
                             ),
@@ -180,7 +272,7 @@ class AutoUpdater:
                     QTimer.singleShot(
                         0,
                         lambda: QMessageBox.critical(
-                            self.parent,
+                            self.parent_widget,
                             "Hata",
                             f"Güncelleme kontrolü sırasında hata oluştu:\n{str(e)}",
                         ),
@@ -188,29 +280,25 @@ class AutoUpdater:
 
         threading.Thread(target=run_check, daemon=True).start()
 
-    def is_newer_version(self, current: str, latest: str) -> bool:
-        """Sipariş Takip (APK-STU) projesindeki sürüm karşılaştırma fonksiyonu."""
-        c_str = current.lower().lstrip("v")
-        l_str = latest.lower().lstrip("v")
-        try:
-            c_parts = [int(x) for x in c_str.split(".")]
-            l_parts = [int(x) for x in l_str.split(".")]
-            max_len = max(len(c_parts), len(l_parts))
-            c_parts += [0] * (max_len - len(c_parts))
-            l_parts += [0] * (max_len - len(l_parts))
-            return l_parts > c_parts
-        except Exception:
-            return l_str > c_str
-
     def prompt_update(self, release_data: dict):
-        """Kullanıcıya yeni sürüm çıktığını soran diyalog penceresi."""
+        """Kullanıcıya yeni sürüm çıktığını soran onay penceresi (MessageBox)."""
         latest_version = release_data.get("tag_name", "v1.0.0")
-        body = release_data.get("body", "Detay belirtilmemiş.")
+        body = release_data.get("body", "").strip()
 
-        msg = f"Yeni bir güncelleme bulundu: {latest_version}\n\nYenilikler:\n{body}\n\nŞimdi indirmek istiyor musunuz?"
+        question_text = "Yeni bir sürüm bulundu, şimdi güncellensin mi?"
+        details = []
+        if latest_version:
+            details.append(f"Yeni Sürüm: {latest_version} (Mevcut: v{APP_VERSION})")
+        if body:
+            details.append(f"Yenilikler:\n{body}")
+
+        msg = question_text
+        if details:
+            msg += "\n\n" + "\n\n".join(details)
+
         reply = QMessageBox.question(
-            self.parent,
-            "Güncelleme Mevcut",
+            self.parent_widget,
+            "Güncelleme",
             msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
@@ -224,15 +312,22 @@ class AutoUpdater:
         exe_asset = None
         for asset in assets:
             name = asset.get("name", "").lower()
-            if name.endswith(".exe") or "faturatakip" in name or "siparistakip" in name:
+            if name.endswith(".exe"):
                 exe_asset = asset
                 break
+
+        if not exe_asset:
+            for asset in assets:
+                name = asset.get("name", "").lower()
+                if "faturatakip" in name or "siparistakip" in name or "setup" in name:
+                    exe_asset = asset
+                    break
 
         if not exe_asset and assets:
             exe_asset = assets[0]
 
         if not exe_asset:
-            QMessageBox.critical(self.parent, "Hata", "Sürümde indirilebilir uygulama dosyası (.exe asset) bulunamadı.")
+            QMessageBox.critical(self.parent_widget, "Hata", "Sürümde indirilebilir uygulama dosyası (.exe) bulunamadı.")
             return
 
         # GitHub token ile indirme yapabilmek için varsa asset API url'si
@@ -241,26 +336,26 @@ class AutoUpdater:
         if "/assets/" in str(download_url):
             asset_headers["Accept"] = "application/octet-stream"
 
-        # Hedef dizini ve orijinal .exe adını belirle
+        # Hedef dizini ve orijinal .exe adını belirle (PyInstaller --onefile uyumlu)
         is_frozen = getattr(sys, "frozen", False)
         if is_frozen:
             current_exe_path = os.path.abspath(sys.executable)
             current_dir = os.path.dirname(current_exe_path)
             target_exe_name = os.path.basename(current_exe_path)
         else:
-            current_dir = os.path.abspath(os.path.dirname(sys.argv[0]))
+            current_dir = get_app_base_dir()
             target_exe_name = "FaturaTakip.exe"
             current_exe_path = os.path.join(current_dir, target_exe_name)
 
         if not target_exe_name.lower().endswith(".exe"):
-            target_exe_name = "FaturaTakip.exe"
+            target_exe_name = f"{target_exe_name}.exe"
 
-        # Güvenli Değiştirme Mantığı - Geçici dosya adı "yeni_surum_temp.exe"
+        # İndirme için geçici dosya yolu
         temp_exe_name = "yeni_surum_temp.exe"
         temp_exe_path = os.path.join(current_dir, temp_exe_name)
 
         # Progress Bar Penceresi
-        self.progress_win = UpdateProgressBarDialog(self.parent)
+        self.progress_win = UpdateProgressBarDialog(self.parent_widget)
         self.progress_win.show()
 
         def do_download():
@@ -296,6 +391,8 @@ class AutoUpdater:
 
                 if self.progress_win:
                     QTimer.singleShot(0, self.progress_win.close)
+
+                # İndirme bittiğinde güvenli dosya değişimi ve yeniden başlatma
                 QTimer.singleShot(
                     100, lambda: self.apply_update_and_restart(current_dir, target_exe_name, temp_exe_name)
                 )
@@ -307,7 +404,7 @@ class AutoUpdater:
                 QTimer.singleShot(
                     0,
                     lambda: QMessageBox.critical(
-                        self.parent,
+                        self.parent_widget,
                         "İndirme Hatası",
                         f"Güncelleme dosyası indirilemedi:\n{str(e)}",
                     ),
@@ -317,61 +414,57 @@ class AutoUpdater:
 
     def apply_update_and_restart(self, current_dir: str, target_exe_name: str, temp_exe_name: str):
         """
-        Sipariş Takip (APK-STU) projesindeki updater.bat oluşturma ve
-        Hot-Swap çalıştırma mantığını birebir uygular.
+        PyInstaller --onefile yapısına uygun olarak güvenli dosya değişimi ve yeniden başlatma:
+        1. Çalışan mevcut .exe dosyasının adını değiştir (.old ekle).
+        2. İndirilen yeni .exe dosyasını orijinal isimle kaydet.
+        3. Geçici bir .bat scripti veya subprocess kullanarak uygulamayı kapatıp yeni sürümü otomatik başlat.
         """
-        current_pid = os.getpid()
+        if os.path.isabs(target_exe_name):
+            current_exe_path = target_exe_name
+            target_exe_name = os.path.basename(current_exe_path)
+        else:
+            current_exe_path = os.path.join(current_dir, target_exe_name)
 
-        # APK-STU projesindeki birebir .bat betiği
-        bat_content = f"""@echo off
-chcp 65001 > nul
+        if os.path.isabs(temp_exe_name):
+            temp_exe_path = temp_exe_name
+            temp_exe_name = os.path.basename(temp_exe_path)
+        else:
+            temp_exe_path = os.path.join(current_dir, temp_exe_name)
 
-:: 1. Gorev Sonlandirma (Taskkill): Ana uygulamanin islemini zorla kapat
-taskkill /F /IM "{target_exe_name}" /T > nul 2>&1
-set PID={current_pid}
-if defined PID taskkill /F /PID %PID% /T > nul 2>&1
+        old_exe_path = os.path.join(current_dir, f"{target_exe_name}.old")
 
-:: 2. Dizin Temizligi (Cleanup): %TEMP% dizinindeki eski _MEI* klasorlerini temizle
-for /d %%x in ("%TEMP%\\_MEI*") do rd /s /q "%%x" > nul 2>&1
+        # 1. Varsa dizindeki eski .old dosyasını temizle
+        if os.path.exists(old_exe_path):
+            try:
+                os.remove(old_exe_path)
+            except Exception as e:
+                logger.warning(f"Mevcut .old dosyası silinemedi: {e}")
+                old_exe_path = os.path.join(current_dir, f"{target_exe_name}.{int(time.time())}.old")
 
-:: 3. Bekleme Suresi (Timeout): Dosya sisteminin serbest kalmasi icin 5 saniye bekle
-timeout /t 5 /nobreak > nul 2>&1 || ping 127.0.0.1 -n 6 > nul
+        # 2. Çalışan mevcut .exe dosyasının adını değiştir (.old ekle)
+        # Windows NT açık/çalışan bir dosyanın yeniden adlandırılmasına (MoveFileEx) izin verir.
+        rename_succeeded = False
+        if os.path.exists(current_exe_path):
+            try:
+                os.rename(current_exe_path, old_exe_path)
+                logger.info(f"Mevcut uygulama yeniden adlandırıldı: {current_exe_path} -> {old_exe_path}")
+                rename_succeeded = True
+            except Exception as e:
+                logger.warning(f"Python aşamasında yeniden adlandırma yapılamadı: {e}")
 
-:: Eski orijinal .exe dosyasini sil (kilit kalkana kadar tekrar dene)
-cd /d "%~dp0"
-set DEL_COUNT=0
-:delete_old
-if exist "{target_exe_name}" (
-    del /f /q "{target_exe_name}" > nul 2>&1
-    if exist "{target_exe_name}" (
-        timeout /t 1 /nobreak > nul 2>&1 || ping 127.0.0.1 -n 2 > nul
-        set /a DEL_COUNT+=1
-        if %DEL_COUNT% leq 5 goto delete_old
-    )
-)
+        # 3. İndirilen yeni .exe dosyasını orijinal isimle kaydet
+        if os.path.exists(temp_exe_path):
+            try:
+                os.rename(temp_exe_path, current_exe_path)
+                logger.info(f"Yeni sürüm orijinal isimle kaydedildi: {temp_exe_path} -> {current_exe_path}")
+            except Exception as e:
+                logger.warning(f"Python aşamasında yeni dosya orijinal isimle kaydedilemedi: {e}")
 
-:: "{temp_exe_name}" dosyasini, silinen orijinal dosyanin tam adiyla yeniden adlandir
-set REN_COUNT=0
-:rename_new
-if exist "{temp_exe_name}" (
-    ren "{temp_exe_name}" "{target_exe_name}" > nul 2>&1
-    if exist "{temp_exe_name}" (
-        timeout /t 1 /nobreak > nul 2>&1 || ping 127.0.0.1 -n 2 > nul
-        set /a REN_COUNT+=1
-        if %REN_COUNT% leq 5 goto rename_new
-    )
-)
-
-:: 4. Sabit Calisma Dizini (Absolute Path): Betigin bulundugu konuma gec ve yeni .exe dosyasini baslat
-cd /d "%~dp0"
-start "" "{target_exe_name}"
-
-:: updater.bat betigini temizle
-del "%~f0" > nul 2>&1
-"""
+        # 4. Geçici .bat scripti oluşturarak uygulamayı yeniden başlat
+        bat_content = generate_update_bat_script(target_exe_name, temp_exe_name)
+        updater_bat_path = os.path.join(current_dir, "updater.bat")
 
         try:
-            updater_bat_path = os.path.join(current_dir, "updater.bat")
             with open(updater_bat_path, "w", encoding="utf-8") as f:
                 f.write(bat_content)
 
@@ -381,22 +474,25 @@ del "%~f0" > nul 2>&1
                     cwd=current_dir,
                     creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, "CREATE_NEW_CONSOLE") else 0,
                 )
-                try:
-                    self.parent.close()
-                except Exception:
-                    pass
+                if self.parent:
+                    try:
+                        self.parent.close()
+                    except Exception:
+                        pass
                 os._exit(0)
             else:
-                temp_exe_full_path = os.path.join(current_dir, temp_exe_name)
-                QMessageBox.information(
-                    self.parent,
-                    "İşlem Tamamlandı",
-                    f"Windows dışı işletim sisteminde çalışıyorsunuz.\nGüncelleme dosyası indirildi:\n{temp_exe_full_path}\nOrijinal dosya adı: {target_exe_name}",
-                )
+                logger.info(f"Güncelleme tamamlandı. Yeni sürüm: {current_exe_path}")
+                if self.parent_widget:
+                    QMessageBox.information(
+                        self.parent_widget,
+                        "Güncelleme Tamamlandı",
+                        f"Yeni sürüm orijinal isimle kaydedildi:\n{current_exe_path}\n\nEski sürüm yedeklendi:\n{old_exe_path}",
+                    )
         except Exception as e:
             logger.error(f"Failed to apply update script: {e}")
-            QMessageBox.critical(
-                self.parent,
-                "Güncelleme Hatası",
-                f"Güncelleme uygulanırken hata oluştu:\n{str(e)}",
-            )
+            if self.parent_widget:
+                QMessageBox.critical(
+                    self.parent_widget,
+                    "Güncelleme Hatası",
+                    f"Güncelleme uygulanırken hata oluştu:\n{str(e)}",
+                )
