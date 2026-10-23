@@ -29,7 +29,7 @@ jobs:
 
       - name: Build EXE with PyInstaller
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name="FaturaTakip" --icon=icon.ico main.py
+          pyinstaller --noconfirm --onefile --windowed --name="FaturaTakip" --icon=icon.ico --collect-all pymupdf main.py
 
       - name: Otomatik Sürüm (Release) Yayınla
         uses: softprops/action-gh-release@v1
