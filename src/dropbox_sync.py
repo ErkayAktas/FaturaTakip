@@ -22,6 +22,7 @@ DROPBOX_REFRESH_TOKEN = "0tfxdj_QbjQAAAAAAAAAAesK-vT29IUt25alSxa5SYqNb7t2GXnMARJ
 DEFAULT_DROPBOX_KEY = DROPBOX_APP_KEY
 
 REMOTE_INFOS_PATH = "/FaturaTakip/infos.json"
+REMOTE_EXPENSES_PATH = "/FaturaTakip/expenses.json"
 REMOTE_SESSIONS_PATH = "/FaturaTakip/sessions.json"
 AUTO_SYNC_INTERVAL_SECONDS = 30
 SESSION_TIMEOUT_SECONDS = 90  # 90 saniyeden uzun süre heartbeat vermeyen kapanmış/çökmüş oturumlar elenir
@@ -63,13 +64,16 @@ class DropboxSyncManager(QObject):
         self.refresh_token = refresh_token
         self.api_key = api_key or app_key
         self.remote_path = REMOTE_INFOS_PATH
+        self.remote_expenses_path = REMOTE_EXPENSES_PATH
         self.remote_sessions_path = REMOTE_SESSIONS_PATH
+        self.local_expenses_path = os.path.join(self.storage_dir, "expenses.json")
 
         # Benzersiz Oturum Tanımlayıcısı
         self.session_id = f"{socket.gethostname()}_{os.getpid()}_{uuid.uuid4().hex[:6]}"
         self.active_session_count = 1
 
         self.last_known_rev: Optional[str] = None
+        self.last_known_expenses_rev: Optional[str] = None
         self._lock = threading.Lock()
         self._is_running = False
         self._auto_sync_thread: Optional[threading.Thread] = None
@@ -161,6 +165,28 @@ class DropboxSyncManager(QObject):
                 logger.info("[Dropbox] Bulutta dosya bulunamadı. Yerel infos.json Dropbox'a yükleniyor...")
                 self._upload_local_file_internal(dbx)
 
+            # Giderler (expenses.json) Başlangıç Kontrolü
+            try:
+                exp_exists = False
+                exp_metadata = None
+                try:
+                    exp_metadata = dbx.files_get_metadata(self.remote_expenses_path)
+                    exp_exists = True
+                except ApiError as ae:
+                    if ae.error.is_path() and ae.error.get_path().is_not_found():
+                        exp_exists = False
+
+                if exp_exists and exp_metadata:
+                    temp_exp = os.path.join(self.storage_dir, f"temp_dbx_exp_{int(time.time())}.json")
+                    dbx.files_download_to_file(temp_exp, self.remote_expenses_path)
+                    with self._lock:
+                        shutil.move(temp_exp, self.local_expenses_path)
+                        self.last_known_expenses_rev = exp_metadata.rev
+                elif os.path.exists(self.local_expenses_path):
+                    self._upload_expenses_file_internal(dbx)
+            except Exception as e:
+                logger.warning(f"[Dropbox Gider Başlangıç Kontrolü] {e}")
+
             # Oturum kaydı aç (Aktif Oturum Takibi)
             self._register_session(dbx)
 
@@ -195,6 +221,35 @@ class DropboxSyncManager(QObject):
                 self._upload_in_progress = False
 
         threading.Thread(target=do_upload, daemon=True).start()
+
+    def trigger_instant_upload_expenses(self):
+        """Gider veritabanında (expenses.json) değişiklik olduğunda anında Dropbox'a yükler."""
+        if not self._is_running:
+            return
+
+        def do_upload():
+            try:
+                dbx = self.get_client()
+                self._upload_expenses_file_internal(dbx)
+            except Exception as e:
+                logger.warning(f"[Dropbox Gider Anlık Yükleme Hatası] {e}")
+
+        threading.Thread(target=do_upload, daemon=True).start()
+
+    def _upload_expenses_file_internal(self, dbx: dropbox.Dropbox):
+        """Yerel expenses.json dosyasını Dropbox'a güvenle yükler."""
+        if not os.path.exists(self.local_expenses_path):
+            return
+        try:
+            with open(self.local_expenses_path, "rb") as f:
+                data_bytes = f.read()
+            mode = dropbox.files.WriteMode.overwrite
+            res = dbx.files_upload(data_bytes, self.remote_expenses_path, mode=mode)
+            with self._lock:
+                self.last_known_expenses_rev = res.rev
+            logger.info(f"[Dropbox] Yerel expenses.json yüklendi (Yeni rev: {res.rev}).")
+        except Exception as e:
+            logger.warning(f"[Dropbox Gider Yükleme Başarısız] {e}")
 
     def _upload_local_file_internal(self, dbx: dropbox.Dropbox):
         """Yerel dosyayı Dropbox'a güvenle yükler ve rev kodunu günceller."""
@@ -272,6 +327,22 @@ class DropboxSyncManager(QObject):
                 self.data_reloaded_from_cloud.emit()
             else:
                 self.sync_status_updated.emit("✓ Dropbox: Senkronize", "#10B981")
+
+            # Giderler (expenses.json) Auto-Sync Kontrolü
+            try:
+                exp_metadata = dbx.files_get_metadata(self.remote_expenses_path)
+                if self.last_known_expenses_rev is None or exp_metadata.rev != self.last_known_expenses_rev:
+                    temp_download_exp = os.path.join(self.storage_dir, f"temp_dbx_exp_sync_{int(time.time())}.json")
+                    dbx.files_download_to_file(temp_download_exp, self.remote_expenses_path)
+                    with self._lock:
+                        shutil.move(temp_download_exp, self.local_expenses_path)
+                        self.last_known_expenses_rev = exp_metadata.rev
+                    self.data_reloaded_from_cloud.emit()
+            except ApiError as ae:
+                if ae.error.is_path() and ae.error.get_path().is_not_found():
+                    pass
+            except Exception as e:
+                logger.warning(f"[Dropbox Expenses Auto-Sync Check] {e}")
 
         except ApiError as ae:
             if ae.error.is_path() and ae.error.get_path().is_not_found():

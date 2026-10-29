@@ -244,6 +244,96 @@ QLineEdit#searchBar:focus {{
     border-color: {COLORS["accent_blue"]};
 }}
 
+/* QComboBox & Dropdown Görünürlüğü (Global Dark Theme Fix) */
+QComboBox {{
+    background-color: #2B2B2B;
+    color: #FFFFFF;
+    border: 1px solid #475569;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    min-height: 22px;
+}}
+
+QComboBox:hover {{
+    border-color: {COLORS["accent_blue"]};
+    background-color: #333333;
+}}
+
+QComboBox:focus {{
+    border: 1px solid {COLORS["accent_blue"]};
+}}
+
+QComboBox:on {{
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
+}}
+
+QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 22px;
+    border-left: 1px solid #475569;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    background-color: #2B2B2B;
+}}
+
+QComboBox::down-arrow {{
+    width: 0px;
+    height: 0px;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #CBD5E1;
+    margin-right: 2px;
+}}
+
+QComboBox::down-arrow:hover {{
+    border-top: 5px solid #FFFFFF;
+}}
+
+/* QComboBox Açılır Menü Listesi (QAbstractItemView / QListView) */
+QComboBox QAbstractItemView {{
+    background-color: #2B2B2B;
+    color: #FFFFFF;
+    border: 1px solid #475569;
+    border-radius: 6px;
+    selection-background-color: #1D4ED8;
+    selection-color: #FFFFFF;
+    outline: 0px;
+    padding: 4px;
+}}
+
+QComboBox QAbstractItemView::item {{
+    min-height: 26px;
+    padding: 4px 8px;
+    background-color: #2B2B2B;
+    color: #FFFFFF;
+    border-radius: 4px;
+}}
+
+QComboBox QAbstractItemView::item:selected {{
+    background-color: #1D4ED8;
+    color: #FFFFFF;
+    font-weight: 600;
+}}
+
+QComboBox QAbstractItemView::item:hover {{
+    background-color: #3B82F6;
+    color: #FFFFFF;
+}}
+
+/* QListView genel seçici (macOS ve Linux uyumluluğu için) */
+QComboBox QListView {{
+    background-color: #2B2B2B;
+    color: #FFFFFF;
+    selection-background-color: #1D4ED8;
+    selection-color: #FFFFFF;
+}}
+
+
+
 /* Scroll Bar */
 QScrollBar:vertical {{
     border: none;

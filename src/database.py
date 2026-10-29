@@ -453,3 +453,260 @@ class InvoiceDatabase:
                 print(f"[Tarih Karşılaştırma Hatası] Fatura No: {inv_no}, Hata: {e}")
 
         return result
+
+    def get_cash_invoices(self) -> List[Dict[str, Any]]:
+        """Nakit Sekmesi: Sistemdeki tüm nakit faturaları ve nakit işlemlerini döner."""
+        invoices = self.load_all()
+        result = []
+        for inv in invoices:
+            inv_no = str(inv.get("invoice_number", "")).strip().lower()
+            inv_id = str(inv.get("id", "")).strip().upper()
+            if inv.get("is_cash", False) or inv_no == "nakit" or inv_id.startswith("NAKIT_"):
+                result.append(inv)
+        return result
+
+
+DEFAULT_EXPENSE_CATEGORIES = [
+    "Yakıt",
+    "Araç Bakım / Onarım",
+    "Kira",
+    "Maaş / Personel",
+    "Yemek / Yol",
+    "Sigorta / Kasko",
+    "Vergi / Harç",
+    "Otoyol / HGS / Köprü",
+    "Ofis / Kırtasiye",
+    "Diğer",
+]
+
+
+class ExpenseDatabase:
+    """TasımaBelgeler/expenses.json dosyasını yöneten yerel JSON gider veritabanı sınıfı."""
+
+    def __init__(self, base_dir: Optional[str] = None):
+        if base_dir is None:
+            base_dir = get_app_base_dir()
+        self.base_dir = os.path.abspath(base_dir)
+        self.storage_dir = os.path.join(self.base_dir, "TasımaBelgeler")
+        self.json_path = os.path.join(self.storage_dir, "expenses.json")
+        self.lock = threading.RLock()
+        self.change_callbacks: List[Callable[[], None]] = []
+
+        self._ensure_storage_exists()
+
+    def add_change_callback(self, cb: Callable[[], None]) -> None:
+        """Gider veritabanı her güncellendiğinde çağrılacak geri çağırma fonksiyonu ekler."""
+        if cb not in self.change_callbacks:
+            self.change_callbacks.append(cb)
+
+    def _notify_change(self) -> None:
+        """Kayıt sonrası tüm geri çağırma fonksiyonlarını tetikler (Dropbox anlık yükleme vb.)."""
+        for cb in list(self.change_callbacks):
+            try:
+                cb()
+            except Exception as e:
+                print(f"[Expense DB Notification Error] {e}")
+
+    def _ensure_storage_exists(self) -> None:
+        """TasımaBelgeler dizini ve expenses.json dosyasının varlığından emin olur."""
+        os.makedirs(self.storage_dir, exist_ok=True)
+        if not os.path.exists(self.json_path):
+            initial_data = {
+                "categories": list(DEFAULT_EXPENSE_CATEGORIES),
+                "expenses": [],
+            }
+            with open(self.json_path, "w", encoding="utf-8") as f:
+                json.dump(initial_data, f, ensure_ascii=False, indent=2)
+
+    def load_data(self) -> Dict[str, Any]:
+        """Gider veritabanı dosyasını okur ve varsayılan alanları güvenceye alır."""
+        with self.lock:
+            try:
+                if not os.path.exists(self.json_path):
+                    self._ensure_storage_exists()
+                with open(self.json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if not isinstance(data, dict):
+                        data = {}
+                    if "categories" not in data or not isinstance(data["categories"], list):
+                        data["categories"] = list(DEFAULT_EXPENSE_CATEGORIES)
+                    if "expenses" not in data or not isinstance(data["expenses"], list):
+                        data["expenses"] = []
+                    return data
+            except (json.JSONDecodeError, OSError):
+                return {
+                    "categories": list(DEFAULT_EXPENSE_CATEGORIES),
+                    "expenses": [],
+                }
+
+    def save_data(self, data: Dict[str, Any]) -> bool:
+        """Veriyi güvenli ve atomik şekilde expenses.json dosyasına kaydeder ve Dropbox'a bildirim gönderir."""
+        with self.lock:
+            try:
+                temp_file = tempfile.NamedTemporaryFile(
+                    mode="w",
+                    dir=self.storage_dir,
+                    delete=False,
+                    encoding="utf-8",
+                )
+                json.dump(data, temp_file, ensure_ascii=False, indent=2)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+                temp_file.close()
+                shutil.move(temp_file.name, self.json_path)
+
+                self._notify_change()
+                return True
+            except Exception as e:
+                print(f"[Expense Database Error] Kaydetme hatası: {e}")
+                return False
+
+    # --- KATEGORİ / GİDER TÜRÜ İŞLEMLERİ ---
+
+    def get_categories(self) -> List[str]:
+        """Tüm kayıtlı gider türlerini döner."""
+        data = self.load_data()
+        return list(data.get("categories", []))
+
+    def add_category(self, name: str) -> bool:
+        """Yeni bir gider türü ekler. Varsa veya boşsa eklemez."""
+        clean_name = str(name).strip()
+        if not clean_name:
+            return False
+
+        with self.lock:
+            data = self.load_data()
+            cats = data.get("categories", [])
+            for c in cats:
+                if c.strip().lower() == clean_name.lower():
+                    return False  # Zaten mevcut
+            cats.append(clean_name)
+            data["categories"] = cats
+            return self.save_data(data)
+
+    def update_category(self, old_name: str, new_name: str) -> bool:
+        """Gider türü ismini günceller ve mevcut giderlerdeki kategori adını da günceller."""
+        clean_old = str(old_name).strip()
+        clean_new = str(new_name).strip()
+        if not clean_old or not clean_new:
+            return False
+
+        with self.lock:
+            data = self.load_data()
+            cats = data.get("categories", [])
+            found = False
+            for idx, c in enumerate(cats):
+                if c.strip().lower() == clean_old.lower():
+                    cats[idx] = clean_new
+                    found = True
+                    break
+
+            if not found:
+                return False
+
+            data["categories"] = cats
+            # Mevcut giderlerdeki eski kategori adını yenisiyle güncelle
+            for exp in data.get("expenses", []):
+                if str(exp.get("category", "")).strip().lower() == clean_old.lower():
+                    exp["category"] = clean_new
+                    exp["updated_at"] = datetime.now().isoformat()
+
+            return self.save_data(data)
+
+    def delete_category(self, name: str) -> bool:
+        """Gider türünü siler."""
+        clean_name = str(name).strip()
+        if not clean_name:
+            return False
+
+        with self.lock:
+            data = self.load_data()
+            cats = data.get("categories", [])
+            filtered = [c for c in cats if c.strip().lower() != clean_name.lower()]
+            if len(filtered) == len(cats):
+                return False
+            data["categories"] = filtered
+            return self.save_data(data)
+
+    def reload(self) -> Dict[str, Any]:
+        """Veritabanını diskten tekrar yükler."""
+        return self.load_data()
+
+    # --- GİDER KAYITLARI İŞLEMLERİ ---
+
+    def get_expenses(
+        self,
+        start_date: Any = None,
+        end_date: Any = None
+    ) -> List[Dict[str, Any]]:
+        """Tarih aralığına göre filtrelenmiş gider kayıtlarını kronolojik döner."""
+        data = self.load_data()
+        expenses = list(data.get("expenses", []))
+
+        start_dt = parse_date_obj(start_date)
+        end_dt = parse_date_obj(end_date)
+
+        if start_dt is None or end_dt is None:
+            # Tarih filtresi yoksa tümünü tarihe göre sıralı dön
+            return sorted(expenses, key=lambda x: str(x.get("date", "")), reverse=True)
+
+        if start_dt > end_dt:
+            start_dt, end_dt = end_dt, start_dt
+
+        result = []
+        for exp in expenses:
+            exp_dt = parse_date_obj(exp.get("date"))
+            if exp_dt and (start_dt <= exp_dt <= end_dt):
+                result.append(exp)
+
+        return sorted(result, key=lambda x: str(x.get("date", "")), reverse=True)
+
+    def add_expense(self, expense_data: Dict[str, Any]) -> bool:
+        """Yeni gider kaydı ekler."""
+        with self.lock:
+            data = self.load_data()
+            if "id" not in expense_data or not expense_data.get("id"):
+                expense_data["id"] = f"EXP_{uuid.uuid4().hex[:8].upper()}"
+
+            amount = float(expense_data.get("amount") or 0.0)
+            expense_data["amount"] = round(amount, 2)
+
+            date_val = parse_date_obj(expense_data.get("date")) or datetime.now().date()
+            expense_data["date"] = date_val.strftime("%Y-%m-%d")
+
+            if "created_at" not in expense_data:
+                expense_data["created_at"] = datetime.now().isoformat()
+            expense_data["updated_at"] = datetime.now().isoformat()
+
+            data.setdefault("expenses", []).append(expense_data)
+            return self.save_data(data)
+
+    def update_expense(self, expense_id: str, updates: Dict[str, Any]) -> bool:
+        """Belirtilen gider kaydını günceller."""
+        clean_id = str(expense_id).strip().upper()
+        with self.lock:
+            data = self.load_data()
+            expenses = data.get("expenses", [])
+            found = False
+            for i, exp in enumerate(expenses):
+                if str(exp.get("id", "")).strip().upper() == clean_id:
+                    expenses[i].update(updates)
+                    expenses[i]["updated_at"] = datetime.now().isoformat()
+                    found = True
+                    break
+            if found:
+                data["expenses"] = expenses
+                return self.save_data(data)
+            return False
+
+    def delete_expense(self, expense_id: str) -> bool:
+        """Belirtilen gider kaydını siler."""
+        clean_id = str(expense_id).strip().upper()
+        with self.lock:
+            data = self.load_data()
+            expenses = data.get("expenses", [])
+            filtered = [e for e in expenses if str(e.get("id", "")).strip().upper() != clean_id]
+            if len(filtered) != len(expenses):
+                data["expenses"] = filtered
+                return self.save_data(data)
+            return False
