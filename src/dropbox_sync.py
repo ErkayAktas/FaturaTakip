@@ -16,10 +16,76 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 logger = logging.getLogger(__name__)
 
-DROPBOX_APP_KEY = "5ymg7fu8z3zha1n"
-DROPBOX_APP_SECRET = "lly1tk6ue4238cc"
-DROPBOX_REFRESH_TOKEN = "0tfxdj_QbjQAAAAAAAAAAesK-vT29IUt25alSxa5SYqNb7t2GXnMARJdeIfdaQhi"
-DEFAULT_DROPBOX_KEY = DROPBOX_APP_KEY
+DROPBOX_APP_KEY = ""
+DROPBOX_APP_SECRET = ""
+DROPBOX_REFRESH_TOKEN = ""
+DEFAULT_DROPBOX_KEY = ""
+CONFIG_FILE_NAME = "config.json"
+
+
+def get_config_file_path(base_dir: Optional[str] = None) -> str:
+    """Uygulamanın config.json yapılandırma dosyası yolunu döner."""
+    if not base_dir:
+        try:
+            from src.database import get_app_base_dir
+            base_dir = get_app_base_dir()
+        except Exception:
+            base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    return os.path.join(base_dir, CONFIG_FILE_NAME)
+
+
+def load_dropbox_config(base_dir: Optional[str] = None) -> Dict[str, str]:
+    """config.json dosyasından Dropbox kimlik bilgilerini okur."""
+    cfg_path = get_config_file_path(base_dir)
+    result = {"app_key": "", "app_secret": "", "refresh_token": ""}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    db_sec = data.get("dropbox")
+                    if isinstance(db_sec, dict):
+                        result["app_key"] = str(db_sec.get("app_key") or "").strip()
+                        result["app_secret"] = str(db_sec.get("app_secret") or "").strip()
+                        result["refresh_token"] = str(db_sec.get("refresh_token") or "").strip()
+                    else:
+                        result["app_key"] = str(data.get("app_key") or data.get("dropbox_app_key") or "").strip()
+                        result["app_secret"] = str(data.get("app_secret") or data.get("dropbox_app_secret") or "").strip()
+                        result["refresh_token"] = str(data.get("refresh_token") or data.get("dropbox_refresh_token") or "").strip()
+        except Exception as e:
+            logger.error(f"Config okuma hatası ({cfg_path}): {e}")
+    return result
+
+
+def save_dropbox_config(app_key: str, app_secret: str, refresh_token: str, base_dir: Optional[str] = None) -> bool:
+    """Dropbox kimlik bilgilerini config.json dosyasına kaydeder."""
+    cfg_path = get_config_file_path(base_dir)
+    try:
+        data = {}
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        data = loaded
+            except Exception:
+                data = {}
+
+        data["dropbox"] = {
+            "app_key": app_key.strip(),
+            "app_secret": app_secret.strip(),
+            "refresh_token": refresh_token.strip(),
+        }
+        data["app_key"] = app_key.strip()
+        data["app_secret"] = app_secret.strip()
+        data["refresh_token"] = refresh_token.strip()
+
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        logger.error(f"Config kaydetme hatası ({cfg_path}): {e}")
+        return False
 
 REMOTE_INFOS_PATH = "/FaturaTakip/infos.json"
 REMOTE_EXPENSES_PATH = "/FaturaTakip/expenses.json"
@@ -50,19 +116,32 @@ class DropboxSyncManager(QObject):
     def __init__(
         self,
         local_json_path: str,
-        app_key: str = DROPBOX_APP_KEY,
-        app_secret: str = DROPBOX_APP_SECRET,
-        refresh_token: str = DROPBOX_REFRESH_TOKEN,
+        app_key: Optional[str] = None,
+        app_secret: Optional[str] = None,
+        refresh_token: Optional[str] = None,
         parent=None,
         api_key: Optional[str] = None
     ):
         super().__init__(parent)
         self.local_json_path = os.path.abspath(local_json_path)
         self.storage_dir = os.path.dirname(self.local_json_path)
-        self.app_key = app_key
-        self.app_secret = app_secret
-        self.refresh_token = refresh_token
-        self.api_key = api_key or app_key
+        self.base_dir = os.path.dirname(self.storage_dir)
+
+        # Eğer parametre olarak verilmemişse yerel config.json dosyasından oku
+        if not app_key or not app_secret or not refresh_token:
+            cfg = load_dropbox_config(base_dir=self.base_dir)
+            if not (cfg["app_key"] and cfg["app_secret"] and cfg["refresh_token"]):
+                cfg_alt = load_dropbox_config(base_dir=self.storage_dir)
+                if cfg_alt["app_key"] and cfg_alt["app_secret"] and cfg_alt["refresh_token"]:
+                    cfg = cfg_alt
+            app_key = app_key or cfg["app_key"]
+            app_secret = app_secret or cfg["app_secret"]
+            refresh_token = refresh_token or cfg["refresh_token"]
+
+        self.app_key = (app_key or "").strip()
+        self.app_secret = (app_secret or "").strip()
+        self.refresh_token = (refresh_token or "").strip()
+        self.api_key = api_key or self.app_key
         self.remote_path = REMOTE_INFOS_PATH
         self.remote_expenses_path = REMOTE_EXPENSES_PATH
         self.remote_sessions_path = REMOTE_SESSIONS_PATH
@@ -83,6 +162,10 @@ class DropboxSyncManager(QObject):
         # Uygulama sonlandığında oturumun otomatik silinmesi için atexit kaydı
         atexit.register(self._on_process_exit)
 
+    def is_configured(self) -> bool:
+        """Dropbox API kimlik bilgilerinin tanımlı olup olmadığını denetler."""
+        return bool(self.app_key and self.app_secret and self.refresh_token)
+
     def get_client(self) -> dropbox.Dropbox:
         """Dropbox istemcisi oluşturur (oauth2_refresh_token ile süresi bitmeyen bağlantı)."""
         return dropbox.Dropbox(
@@ -93,6 +176,11 @@ class DropboxSyncManager(QObject):
 
     def start(self):
         """Senkronizasyon servisini ve canlı oturum takip döngüsünü başlatır."""
+        if not self.is_configured():
+            logger.warning("Dropbox kimlik bilgileri eksik veya config.json bulunamadı.")
+            self.sync_status_updated.emit("● Dropbox: Ayarlar menüsünden Dropbox API bilgilerini giriniz", "#EF4444")
+            return
+
         if self._is_running:
             return
         self._is_running = True
@@ -109,7 +197,20 @@ class DropboxSyncManager(QObject):
         if not self._is_running:
             return
         self._is_running = False
-        self._unregister_session_sync()
+        if self.is_configured():
+            self._unregister_session_sync()
+
+    def reconfigure(self, app_key: str, app_secret: str, refresh_token: str):
+        """Ayarlar menüsünden yeni şifreler kaydedildiğinde DropboxSyncManager sınıfını güncel verilerle güvenli şekilde yeniden başlatır."""
+        self.stop()
+        self.app_key = (app_key or "").strip()
+        self.app_secret = (app_secret or "").strip()
+        self.refresh_token = (refresh_token or "").strip()
+        self.api_key = self.app_key
+        if self.is_configured():
+            self.start()
+        else:
+            self.sync_status_updated.emit("● Dropbox: Ayarlar menüsünden Dropbox API bilgilerini giriniz", "#EF4444")
 
     def _on_process_exit(self):
         if self._is_running:
@@ -202,7 +303,7 @@ class DropboxSyncManager(QObject):
     # --- 2. ANLIK YÜKLEME (INSTANT UPLOAD) ---
     def trigger_instant_upload(self):
         """Veritabanında bir değişiklik yapıldığında (save_all) anında Dropbox'a yükler ve sayacı sıfırlar."""
-        if not self._is_running:
+        if not self.is_configured() or not self._is_running:
             return
 
         def do_upload():
@@ -224,7 +325,7 @@ class DropboxSyncManager(QObject):
 
     def trigger_instant_upload_expenses(self):
         """Gider veritabanında (expenses.json) değişiklik olduğunda anında Dropbox'a yükler."""
-        if not self._is_running:
+        if not self.is_configured() or not self._is_running:
             return
 
         def do_upload():
@@ -435,6 +536,8 @@ class DropboxSyncManager(QObject):
 
     def _unregister_session_sync(self):
         """Uygulama kapanışında oturumu siler ve aktif oturum sayısını düşürür."""
+        if not self.is_configured():
+            return
         try:
             dbx = self.get_client()
             with self._lock:

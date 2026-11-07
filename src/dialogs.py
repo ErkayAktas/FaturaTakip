@@ -1,10 +1,13 @@
+import calendar
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
-from PyQt6.QtCore import QDate, Qt
+from PyQt6.QtCore import QDate, QRectF, Qt
+from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCalendarWidget,
+    QCheckBox,
     QComboBox,
     QDateEdit,
     QDialog,
@@ -943,6 +946,294 @@ class NakitGirisDialog(BaseResponsiveDialog):
         }
 
 
+class NakitDuzenleDialog(BaseResponsiveDialog):
+    """
+    Nakit İşlem Düzenleme Pop-up'ı:
+    - Nakit sekmesinde veya diğer sekmelerde bir nakit işlemine çift tıklandığında açılır.
+    - Fiyat/Tutar bilgisinin (QDoubleSpinBox) sayısal olarak değiştirilmesini sağlar.
+    - Firma İsmi, Tarih, Vade/Ödeme Durumu, İletişim Bilgileri ve Notların güncellenmesini sağlar.
+    - Silme (Kayıttan çıkarma) seçeneği sunar.
+    """
+
+    def __init__(self, invoice_data: Dict[str, Any], db=None, parent=None):
+        super().__init__(parent, max_screen_ratio=0.85)
+        self.invoice = dict(invoice_data)
+        self.db = db
+        self.delete_requested = False
+        self.setWindowTitle("💵 Nakit İşlemi Düzenle")
+        self.setMinimumWidth(520)
+        self.setup_ui()
+
+    def setup_ui(self):
+        root_layout = QVBoxLayout(self)
+        root_layout.setSpacing(8)
+        root_layout.setContentsMargins(16, 16, 16, 12)
+
+        # Kaydırılabilir Alan (QScrollArea)
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
+        layout.setSpacing(14)
+        layout.setContentsMargins(8, 6, 8, 6)
+
+        # Başlık ve Açıklama
+        title_lbl = QLabel("💵 Nakit İşlemi Düzenle")
+        title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #10B981;")
+        sub_lbl = QLabel("Tutar/fiyat, firma ismi, tarih ve tahsilat durumunu güncelleyebilirsiniz.")
+        sub_lbl.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        layout.addWidget(title_lbl)
+        layout.addWidget(sub_lbl)
+
+        # Form Kartı
+        form_frame = QFrame()
+        form_frame.setStyleSheet(
+            f"background-color: {COLORS['bg_card']}; border: 1px solid {COLORS['border']}; border-radius: 8px; padding: 14px;"
+        )
+        form_layout = QFormLayout(form_frame)
+        form_layout.setSpacing(10)
+
+        # 1. İşlem No (Salt Okunur)
+        inv_no = str(self.invoice.get("invoice_number", "Nakit"))
+        inv_id = str(self.invoice.get("id", ""))
+        self.inv_no_edit = QLineEdit(f"{inv_no} ({inv_id})" if inv_id else inv_no)
+        self.inv_no_edit.setReadOnly(True)
+        self.inv_no_edit.setStyleSheet("font-weight: bold; color: #10B981; background-color: #0F172A; padding: 6px;")
+        form_layout.addRow("İşlem No / ID:", self.inv_no_edit)
+
+        # 2. Firma İsmi
+        self.company_edit = QLineEdit(str(self.invoice.get("company_name", "")))
+        self.company_edit.setPlaceholderText("İşlem Yapılan Firma İsmi (Zorunlu)")
+        self.company_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+        form_layout.addRow("Firma İsmi *:", self.company_edit)
+
+        # 3. İşlem Tarihi
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        inv_dt = parse_date_obj(self.invoice.get("invoice_date")) or date.today()
+        self.date_edit.setDate(QDate(inv_dt.year, inv_dt.month, inv_dt.day))
+        self.date_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+        form_layout.addRow("İşlem Tarihi *:", self.date_edit)
+
+        # 4. Fiyat / Tutar Alanları (Tutar düzenleme: Vergi Hariç, KDV ve Toplam Tutar)
+        tax_ex = float(self.invoice.get("tax_excluded_amount") or 0.0)
+        kdv = float(self.invoice.get("kdv_amount") or 0.0)
+        tot = float(self.invoice.get("total_amount") if self.invoice.get("total_amount") is not None else (tax_ex + kdv))
+
+        self.tax_ex_spin = QDoubleSpinBox()
+        self.tax_ex_spin.setRange(0.0, 999999999.0)
+        self.tax_ex_spin.setDecimals(2)
+        self.tax_ex_spin.setSuffix(" TL")
+        self.tax_ex_spin.setValue(tax_ex)
+        self.tax_ex_spin.setStyleSheet("color: #38BDF8; font-weight: bold; padding: 6px;")
+        self.tax_ex_spin.valueChanged.connect(self._recalc_total_from_parts)
+
+        self.kdv_spin = QDoubleSpinBox()
+        self.kdv_spin.setRange(0.0, 999999999.0)
+        self.kdv_spin.setDecimals(2)
+        self.kdv_spin.setSuffix(" TL")
+        self.kdv_spin.setValue(kdv)
+        self.kdv_spin.setStyleSheet("color: #F59E0B; font-weight: bold; padding: 6px;")
+        self.kdv_spin.valueChanged.connect(self._recalc_total_from_parts)
+
+        self.total_spin = QDoubleSpinBox()
+        self.total_spin.setRange(0.01, 999999999.0)
+        self.total_spin.setDecimals(2)
+        self.total_spin.setSuffix(" TL")
+        self.total_spin.setValue(tot if tot > 0 else 0.01)
+        self.total_spin.setStyleSheet("color: #10B981; font-weight: bold; font-size: 15px; padding: 6px; background-color: #0F172A;")
+        self.total_spin.valueChanged.connect(self._on_total_spin_changed)
+
+        form_layout.addRow("Vergi Hariç Tutar:", self.tax_ex_spin)
+        form_layout.addRow("Vergi (KDV Tutarı):", self.kdv_spin)
+        form_layout.addRow("Toplam Tutar / Fiyat *:", self.total_spin)
+
+        layout.addWidget(form_frame)
+
+        # 5. Tahsilat / Ödeme Durumu
+        status = str(self.invoice.get("status", "active")).lower()
+        is_paid = status in ["paid", "ödendi", "odendi"]
+
+        status_box = QGroupBox("Tahsilat / Ödeme Durumu")
+        status_box.setStyleSheet(f"font-weight: bold; color: {COLORS['text_primary']};")
+        status_layout = QVBoxLayout(status_box)
+
+        self.radio_paid = QRadioButton("✓ Nakit Tahsil Edildi (Ödendi)")
+        self.radio_paid.setStyleSheet("color: #10B981; font-weight: bold;")
+        self.radio_paid.setChecked(is_paid)
+
+        self.radio_pending = QRadioButton("⏳ Nakit Bekleniyor (Vadesi Var)")
+        self.radio_pending.setStyleSheet("color: #F59E0B; font-weight: bold;")
+        self.radio_pending.setChecked(not is_paid)
+
+        status_layout.addWidget(self.radio_paid)
+        status_layout.addWidget(self.radio_pending)
+
+        # Vade Tarihi Alanı
+        self.due_container = QWidget()
+        due_row = QHBoxLayout(self.due_container)
+        due_row.setContentsMargins(0, 4, 0, 0)
+        due_row.addWidget(QLabel("Nakit Vade Tarihi:"))
+        self.due_date_edit = QDateEdit()
+        self.due_date_edit.setCalendarPopup(True)
+        self.due_date_edit.setDisplayFormat("dd.MM.yyyy")
+        due_dt = parse_date_obj(self.invoice.get("due_date")) or date.today()
+        self.due_date_edit.setDate(QDate(due_dt.year, due_dt.month, due_dt.day))
+        due_row.addWidget(self.due_date_edit)
+        self.due_container.setVisible(not is_paid)
+
+        self.radio_pending.toggled.connect(lambda checked: self.due_container.setVisible(checked))
+        status_layout.addWidget(self.due_container)
+        layout.addWidget(status_box)
+
+        # 6. Gizli İletişim Bilgileri (İsim ve Telefon)
+        contact_box = QGroupBox("📞 Firma İletişim Bilgileri (Yetkili)")
+        contact_box.setStyleSheet(
+            f"QGroupBox {{ font-weight: bold; color: #38BDF8; border: 1px solid {COLORS['border']}; border-radius: 8px; padding: 10px; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; }}"
+        )
+        contact_layout = QFormLayout(contact_box)
+        contact_layout.setSpacing(8)
+
+        self.contact_name_edit = QLineEdit(str(self.invoice.get("contact_name", "")))
+        self.contact_name_edit.setPlaceholderText("Yetkili Adı Soyadı")
+        self.contact_name_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+
+        self.contact_phone_edit = QLineEdit(str(self.invoice.get("contact_phone", "")))
+        self.contact_phone_edit.setPlaceholderText("Telefon Numarası (05xx xxx xx xx)")
+        self.contact_phone_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+
+        contact_layout.addRow("Yetkili İsim:", self.contact_name_edit)
+        contact_layout.addRow("Telefon Numarası:", self.contact_phone_edit)
+        layout.addWidget(contact_box)
+
+        # 7. Not / Açıklama
+        self.notes_edit = QLineEdit(str(self.invoice.get("notes", "")))
+        self.notes_edit.setPlaceholderText("İşlem açıklaması veya not (Opsiyonel)")
+        self.notes_edit.setStyleSheet("padding: 6px; font-size: 13px;")
+        layout.addWidget(self.notes_edit)
+
+        scroll_area.setWidget(content_widget)
+        root_layout.addWidget(scroll_area, 1)
+
+        # Alt Butonlar: Sil, İptal, Kaydet
+        btn_frame = QFrame()
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(8, 4, 8, 4)
+        btn_layout.setSpacing(10)
+
+        self.delete_btn = QPushButton("🗑️ İşlemi Sil")
+        self.delete_btn.setStyleSheet(
+            "QPushButton { background-color: #EF4444; color: #FFFFFF; font-weight: bold; padding: 8px 16px; border-radius: 6px; } "
+            "QPushButton:hover { background-color: #DC2626; }"
+        )
+        self.delete_btn.clicked.connect(self._on_delete)
+
+        self.cancel_btn = QPushButton("İptal")
+        self.cancel_btn.setObjectName("secondaryBtn")
+        self.cancel_btn.clicked.connect(self.reject)
+
+        self.save_btn = QPushButton("💾 Değişiklikleri Kaydet")
+        self.save_btn.setObjectName("successBtn")
+        self.save_btn.setStyleSheet("padding: 8px 20px; font-size: 13px; font-weight: bold;")
+        self.save_btn.clicked.connect(self._on_save)
+
+        btn_layout.addWidget(self.delete_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.cancel_btn)
+        btn_layout.addWidget(self.save_btn)
+        root_layout.addWidget(btn_frame)
+
+    def _recalc_total_from_parts(self):
+        tax_ex = self.tax_ex_spin.value()
+        kdv = self.kdv_spin.value()
+        self.total_spin.blockSignals(True)
+        self.total_spin.setValue(round(tax_ex + kdv, 2))
+        self.total_spin.blockSignals(False)
+
+    def _on_total_spin_changed(self, total: float):
+        if self.tax_ex_spin.value() == 0.0 and self.kdv_spin.value() == 0.0:
+            self.tax_ex_spin.blockSignals(True)
+            self.tax_ex_spin.setValue(total)
+            self.tax_ex_spin.blockSignals(False)
+
+    def _on_delete(self):
+        comp = self.company_edit.text().strip() or "Bu"
+        reply = QMessageBox.question(
+            self,
+            "Nakit İşlemi Sil",
+            f"'{comp}' firmasına ait nakit işlem kaydını silmek istediğinize emin misiniz?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.delete_requested = True
+            self.accept()
+
+    def _on_save(self):
+        comp = self.company_edit.text().strip()
+        if not comp:
+            QMessageBox.warning(self, "Eksik Alan", "Lütfen bir firma ismi giriniz.")
+            self.company_edit.setFocus()
+            return
+
+        if self.total_spin.value() <= 0:
+            QMessageBox.warning(self, "Eksik Tutar", "Lütfen sıfırdan büyük geçerli bir tutar giriniz.")
+            self.total_spin.setFocus()
+            return
+
+        self.accept()
+
+    def get_result(self) -> Dict[str, Any]:
+        qdate = self.date_edit.date()
+        date_str = f"{qdate.year():04d}-{qdate.month():02d}-{qdate.day():02d}"
+
+        tax_ex = round(self.tax_ex_spin.value(), 2)
+        kdv = round(self.kdv_spin.value(), 2)
+        total = round(self.total_spin.value(), 2)
+
+        if tax_ex == 0.0 and kdv == 0.0:
+            tax_ex = total
+
+        is_paid = self.radio_paid.isChecked()
+        if is_paid:
+            status = "paid"
+            pay_date = date_str
+            due_date = date_str
+            paid_amt = total
+            rem_amt = 0.0
+        else:
+            status = "active"
+            pay_date = None
+            paid_amt = 0.0
+            rem_amt = total
+            q_due = self.due_date_edit.date()
+            due_date = f"{q_due.year():04d}-{q_due.month():02d}-{q_due.day():02d}"
+
+        return {
+            "company_name": self.company_edit.text().strip(),
+            "invoice_date": date_str,
+            "tax_excluded_amount": tax_ex,
+            "kdv_amount": kdv,
+            "total_amount": total,
+            "currency": "TL",
+            "status": status,
+            "payment_date": pay_date,
+            "paid_amount": paid_amt,
+            "remaining_amount": rem_amt,
+            "due_date": due_date,
+            "contact_name": self.contact_name_edit.text().strip(),
+            "contact_phone": self.contact_phone_edit.text().strip(),
+            "notes": self.notes_edit.text().strip(),
+            "is_cash": True,
+        }
+
+
 class TopluVadeDialog(BaseResponsiveDialog):
     """
     Toplu Vade Değiştirme Pop-up'ı:
@@ -1101,6 +1392,370 @@ class TopluOdemeDialog(BaseResponsiveDialog):
     def get_selected_date_display(self) -> str:
         d = self.date_edit.date()
         return f"{d.day():02d}.{d.month():02d}.{d.year()}"
+
+
+class ModernFinancialRatioBar(QWidget):
+    """
+    Modern İki Parçalı Finansal Dağılım Çubuğu:
+    - Toplam genişliği %100 kabul edip sol tarafı Gelir (Yeşil: #10B981),
+      sağ tarafı Gider (Kırmızı/Turuncu: #EF4444) olacak şekilde yan yana (side-by-side)
+      köşeleri yuvarlatılmış (border-radius) iki parçalı özel tasarım çizer.
+    - Hover durumunda detaylı tutar ve yüzde bilgisi tooltip olarak gösterilir.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(22)
+        self.setMinimumWidth(200)
+        self.income_amount: float = 0.0
+        self.expense_amount: float = 0.0
+        self.income_pct: float = 50.0
+        self.expense_pct: float = 50.0
+        self.has_data: bool = False
+
+    def set_values(self, income: float, expense: float):
+        self.income_amount = max(0.0, float(income or 0.0))
+        self.expense_amount = max(0.0, float(expense or 0.0))
+        total = self.income_amount + self.expense_amount
+        if total > 0:
+            self.income_pct = (self.income_amount / total) * 100.0
+            self.expense_pct = (self.expense_amount / total) * 100.0
+            self.has_data = True
+            self.setToolTip(
+                f"📊 Finansal Dağılım:\n"
+                f"• Gelir: {self.income_amount:,.2f} TL (%{self.income_pct:.1f})\n"
+                f"• Gider: {self.expense_amount:,.2f} TL (%{self.expense_pct:.1f})\n"
+                f"• Toplam Hacim: {total:,.2f} TL"
+            )
+        else:
+            self.income_pct = 50.0
+            self.expense_pct = 50.0
+            self.has_data = False
+            self.setToolTip("Henüz veri bulunmuyor.")
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = self.rect()
+        w = rect.width()
+        h = rect.height()
+        radius = 7.0
+
+        # Arka plan klip patikası (Köşeleri yuvarlatılmış)
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(0.0, 0.0, float(w), float(h), radius, radius)
+        painter.setClipPath(clip_path)
+
+        if not self.has_data:
+            painter.fillRect(rect, QColor("#1E293B"))
+            painter.setPen(QPen(QColor("#475569"), 1))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Veri Yok")
+            return
+
+        total = self.income_amount + self.expense_amount
+        if total <= 0:
+            painter.fillRect(rect, QColor("#1E293B"))
+            return
+
+        income_ratio = self.income_amount / total
+        split_x = int(round(w * income_ratio))
+
+        # 1. Sol Taraf: Gelir (Yeşil)
+        if split_x > 0:
+            left_rect = QRectF(0.0, 0.0, float(split_x), float(h))
+            painter.fillRect(left_rect, QColor("#10B981"))
+            if split_x >= 65:
+                painter.setPen(QColor("#FFFFFF"))
+                font = painter.font()
+                font.setPointSize(9)
+                font.setBold(True)
+                painter.setFont(font)
+                painter.drawText(left_rect, Qt.AlignmentFlag.AlignCenter, f"%{self.income_pct:.0f} Gelir")
+
+        # 2. Sağ Taraf: Gider (Kırmızı/Turuncu)
+        if split_x < w:
+            right_w = float(w - split_x)
+            right_rect = QRectF(float(split_x), 0.0, right_w, float(h))
+            painter.fillRect(right_rect, QColor("#EF4444"))
+            if right_w >= 65:
+                painter.setPen(QColor("#FFFFFF"))
+                font = painter.font()
+                font.setPointSize(9)
+                font.setBold(True)
+                painter.setFont(font)
+                painter.drawText(right_rect, Qt.AlignmentFlag.AlignCenter, f"%{self.expense_pct:.0f} Gider")
+
+        # İki parça arasında ince ayırıcı çizgi
+        if 0 < split_x < w:
+            painter.setPen(QPen(QColor("#0F172A"), 1.5))
+            painter.drawLine(split_x, 0, split_x, h)
+
+
+class GiderDuzenleDialog(BaseResponsiveDialog):
+    """
+    Çift Tıklama ile Gider Düzenleme Penceresi:
+    - Tabloda herhangi bir satıra çift tıklandığında açılır.
+    - Seçilen satırın verileriyle (Tarih, Gider Türü, Tutar, Açıklama/Not) dolu gelir.
+    - Kaydet'e basıldığında expenses.json güncellenir ve arayüz anında yenilenir.
+    """
+
+    def __init__(self, expense_data: Dict[str, Any], expense_db: ExpenseDatabase, dropbox_sync=None, parent=None):
+        super().__init__(parent, max_screen_ratio=0.75)
+        self.expense_data = expense_data
+        self.expense_db = expense_db
+        self.dropbox_sync = dropbox_sync
+        self.expense_id = str(expense_data.get("id", ""))
+
+        self.setWindowTitle("✏️ Gider Kaydını Düzenle")
+        self.setMinimumWidth(440)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(16, 16, 16, 16)
+        root_layout.setSpacing(12)
+
+        # Üst Başlık Kartı
+        header = QFrame()
+        header.setStyleSheet("background-color: #0F172A; border: 1px solid #334155; border-radius: 8px; padding: 10px 14px;")
+        h_layout = QVBoxLayout(header)
+        h_layout.setSpacing(3)
+        lbl_title = QLabel("✏️ GİDER DÜZENLE")
+        lbl_title.setStyleSheet("font-size: 15px; font-weight: 800; color: #FFFFFF;")
+        lbl_sub = QLabel("Harcama bilgilerini güncelleyin ve kaydedin.")
+        lbl_sub.setStyleSheet("font-size: 11px; color: #94A3B8;")
+        h_layout.addWidget(lbl_title)
+        h_layout.addWidget(lbl_sub)
+        root_layout.addWidget(header)
+
+        # Form Kartı
+        form_frame = QFrame()
+        form_frame.setStyleSheet("background-color: #1E293B; border: 1px solid #334155; border-radius: 8px; padding: 14px;")
+        form = QFormLayout(form_frame)
+        form.setSpacing(12)
+
+        # 1. Tarih
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        dt_obj = parse_date_obj(self.expense_data.get("date")) or date.today()
+        self.date_edit.setDate(QDate(dt_obj.year, dt_obj.month, dt_obj.day))
+        self.date_edit.setStyleSheet("background-color: #0F172A; padding: 6px 10px; border-radius: 6px; color: #FFFFFF;")
+        if self.date_edit.calendarWidget():
+            self.date_edit.calendarWidget().setGridVisible(True)
+        form.addRow("Gider Tarihi *:", self.date_edit)
+
+        # 2. Gider Türü
+        self.combo_cat = QComboBox()
+        self.combo_cat.setView(QListView())
+        categories = self.expense_db.get_categories()
+        current_cat = str(self.expense_data.get("category", "")).strip()
+        if current_cat and current_cat not in categories:
+            categories.append(current_cat)
+        self.combo_cat.addItems(categories)
+        if current_cat in categories:
+            self.combo_cat.setCurrentText(current_cat)
+        self.combo_cat.setStyleSheet(
+            "QComboBox { background-color: #0F172A; color: #FFFFFF; border: 1px solid #475569; border-radius: 6px; padding: 6px 12px; font-weight: bold; } "
+            "QComboBox QAbstractItemView { background-color: #0F172A; color: #FFFFFF; selection-background-color: #0284C7; }"
+        )
+        form.addRow("Gider Türü *:", self.combo_cat)
+
+        # 3. Tutar
+        self.spin_amount = QDoubleSpinBox()
+        self.spin_amount.setRange(0.01, 999999999.00)
+        self.spin_amount.setDecimals(2)
+        self.spin_amount.setSuffix(" TL")
+        curr_amt = float(self.expense_data.get("amount") or 0.0)
+        self.spin_amount.setValue(curr_amt)
+        self.spin_amount.setStyleSheet(
+            "background-color: #0F172A; color: #F59E0B; font-size: 15px; font-weight: bold; padding: 6px 10px; border-radius: 6px;"
+        )
+        form.addRow("Harcama Tutarı *:", self.spin_amount)
+
+        # 4. Açıklama / Ayrıntı
+        self.input_desc = QLineEdit()
+        self.input_desc.setText(str(self.expense_data.get("description", "")))
+        self.input_desc.setPlaceholderText("Açıklama, fiş/fatura detayı, plaka veya not...")
+        self.input_desc.setStyleSheet("background-color: #0F172A; padding: 6px 10px; border-radius: 6px; color: #FFFFFF;")
+        form.addRow("Açıklama / Not:", self.input_desc)
+
+        root_layout.addWidget(form_frame)
+
+        # Butonlar
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        btn_cancel = QPushButton("Vazgeç")
+        btn_cancel.setStyleSheet("background-color: #334155; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 6px;")
+        btn_cancel.clicked.connect(self.reject)
+
+        btn_save = QPushButton("💾 Değişiklikleri Kaydet")
+        btn_save.setStyleSheet("background-color: #10B981; color: #FFFFFF; font-weight: bold; padding: 8px 24px; border-radius: 6px;")
+        btn_save.clicked.connect(self._save_changes)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_save)
+        root_layout.addLayout(btn_layout)
+
+    def _save_changes(self):
+        cat = self.combo_cat.currentText().strip()
+        if not cat:
+            QMessageBox.warning(self, "Uyarı", "Lütfen bir gider türü seçiniz.")
+            return
+
+        amt = self.spin_amount.value()
+        if amt <= 0:
+            QMessageBox.warning(self, "Uyarı", "Lütfen sıfırdan büyük bir harcama tutarı giriniz.")
+            return
+
+        qd = self.date_edit.date()
+        date_str = f"{qd.year():04d}-{qd.month():02d}-{qd.day():02d}"
+        desc = self.input_desc.text().strip()
+
+        updates = {
+            "category": cat,
+            "date": date_str,
+            "amount": amt,
+            "description": desc,
+        }
+
+        success = self.expense_db.update_expense(self.expense_id, updates)
+        if success:
+            if self.dropbox_sync:
+                self.dropbox_sync.trigger_instant_upload_expenses()
+            self.accept()
+        else:
+            QMessageBox.critical(self, "Hata", "Gider kaydı güncellenirken bir hata oluştu.")
+
+
+class DropboxAyarlariDialog(BaseResponsiveDialog):
+    """
+    Dropbox Yedekleme ve Senkronizasyon Ayarları Penceresi (OAuth2):
+    - App Key, App Secret ve Refresh Token bilgilerini config.json dosyasına kaydeder.
+    - Şifre alanlarının gizlenip açılmasını sağlar.
+    - Kayıt sonrasında DropboxSyncManager'ı güncel kimlik bilgileriyle güvenli şekilde yeniden başlatır.
+    """
+
+    def __init__(self, on_saved_callback=None, base_dir: Optional[str] = None, parent=None):
+        super().__init__(parent, max_screen_ratio=0.80)
+        self.on_saved_callback = on_saved_callback
+        self.base_dir = base_dir
+        self.setWindowTitle("⚙️ Dropbox Yedekleme Ayarları (OAuth2)")
+        self.setMinimumWidth(500)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(18, 18, 18, 18)
+        root_layout.setSpacing(14)
+
+        # Üst Başlık Kartı
+        header = QFrame()
+        header.setStyleSheet("background-color: #0F172A; border: 1px solid #334155; border-radius: 8px; padding: 12px 16px;")
+        h_layout = QVBoxLayout(header)
+        h_layout.setSpacing(4)
+        lbl_title = QLabel("☁️ DROPBOX YEDEKLEME AYARLARI")
+        lbl_title.setStyleSheet("font-size: 15px; font-weight: 800; color: #FFFFFF;")
+        lbl_sub = QLabel("Kalıcı senkronizasyon için Dropbox API kimlik bilgilerinizi ve Refresh Token değerini girin.")
+        lbl_sub.setStyleSheet("font-size: 11px; color: #94A3B8;")
+        h_layout.addWidget(lbl_title)
+        h_layout.addWidget(lbl_sub)
+        root_layout.addWidget(header)
+
+        # Mevcut Değerleri config.json'dan yükle
+        from src.dropbox_sync import load_dropbox_config
+        cfg = load_dropbox_config(base_dir=self.base_dir)
+
+        # Form Kartı
+        form_card = QFrame()
+        form_card.setStyleSheet("background-color: #1E293B; border: 1px solid #334155; border-radius: 8px; padding: 14px;")
+        form = QFormLayout(form_card)
+        form.setSpacing(12)
+
+        # 1. App Key
+        self.input_app_key = QLineEdit()
+        self.input_app_key.setText(cfg.get("app_key", ""))
+        self.input_app_key.setPlaceholderText("Dropbox App Key (Örn: 5ymg7fu8z3zha1n)...")
+        self.input_app_key.setStyleSheet("background-color: #0F172A; padding: 7px 10px; border-radius: 6px; color: #FFFFFF;")
+        form.addRow("App Key (API Key) *:", self.input_app_key)
+
+        # 2. App Secret
+        self.input_app_secret = QLineEdit()
+        self.input_app_secret.setEchoMode(QLineEdit.EchoMode.Password)
+        self.input_app_secret.setText(cfg.get("app_secret", ""))
+        self.input_app_secret.setPlaceholderText("Dropbox App Secret...")
+        self.input_app_secret.setStyleSheet("background-color: #0F172A; padding: 7px 10px; border-radius: 6px; color: #FFFFFF;")
+        form.addRow("App Secret *:", self.input_app_secret)
+
+        # 3. Refresh Token
+        self.input_refresh_token = QLineEdit()
+        self.input_refresh_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.input_refresh_token.setText(cfg.get("refresh_token", ""))
+        self.input_refresh_token.setPlaceholderText("Dropbox OAuth2 Refresh Token...")
+        self.input_refresh_token.setStyleSheet("background-color: #0F172A; padding: 7px 10px; border-radius: 6px; color: #FFFFFF;")
+        form.addRow("Refresh Token *:", self.input_refresh_token)
+
+        # Şifreleri Göster Checkbox
+        self.chk_show = QCheckBox("Şifreleri Göster")
+        self.chk_show.setStyleSheet("color: #94A3B8; font-size: 11px;")
+        self.chk_show.toggled.connect(self._toggle_password_visibility)
+        form.addRow("", self.chk_show)
+
+        root_layout.addWidget(form_card)
+
+        # Bilgi Notu
+        info_lbl = QLabel("💡 Bilgiler yerel 'config.json' dosyasına kaydedilir ve .gitignore ile korunur.")
+        info_lbl.setStyleSheet("font-size: 11px; color: #94A3B8; font-style: italic;")
+        root_layout.addWidget(info_lbl)
+
+        # Butonlar
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        btn_cancel = QPushButton("Kapat")
+        btn_cancel.setStyleSheet("background-color: #334155; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 6px;")
+        btn_cancel.clicked.connect(self.reject)
+
+        btn_save = QPushButton("💾 Bilgileri Kaydet ve Bağlan")
+        btn_save.setStyleSheet("background-color: #10B981; color: #FFFFFF; font-weight: bold; padding: 8px 24px; border-radius: 6px;")
+        btn_save.clicked.connect(self._save_credentials)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_save)
+        root_layout.addLayout(btn_layout)
+
+    def _toggle_password_visibility(self, checked: bool):
+        mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+        self.input_app_secret.setEchoMode(mode)
+        self.input_refresh_token.setEchoMode(mode)
+
+    def _save_credentials(self):
+        from src.dropbox_sync import save_dropbox_config
+        app_key = self.input_app_key.text().strip()
+        app_secret = self.input_app_secret.text().strip()
+        refresh_token = self.input_refresh_token.text().strip()
+
+        if not app_key or not app_secret or not refresh_token:
+            QMessageBox.warning(self, "Eksik Bilgi", "Lütfen App Key, App Secret ve Refresh Token alanlarının tamamını doldurunuz.")
+            return
+
+        saved = save_dropbox_config(app_key, app_secret, refresh_token, base_dir=self.base_dir)
+        if saved:
+            if callable(self.on_saved_callback):
+                self.on_saved_callback(app_key, app_secret, refresh_token)
+            QMessageBox.information(
+                self,
+                "Başarılı",
+                "Dropbox kimlik bilgileri 'config.json' dosyasına kaydedildi ve senkronizasyon servisi güncellendi."
+            )
+            self.accept()
+        else:
+            QMessageBox.critical(self, "Hata", "Kimlik bilgileri yapılandırma dosyasına kaydedilemedi.")
 
 
 class GiderYonetimiWidget(QWidget):
@@ -1464,7 +2119,32 @@ class GiderYonetimiWidget(QWidget):
             "QTableWidget { background-color: #0F172A; border: 1px solid #334155; border-radius: 6px; } "
             "QTableWidget::item { padding: 6px 10px; }"
         )
+        self.table_recent_expenses.cellDoubleClicked.connect(self._on_recent_expense_double_clicked)
         layout.addWidget(self.table_recent_expenses, 1)
+
+    def _on_recent_expense_double_clicked(self, row: int, col: int):
+        """Çift Tıklama ile Gider Düzenleme: Satıra çift tıklandığında düzenleme penceresi açılır."""
+        if col == 4:
+            return
+        item = self.table_recent_expenses.item(row, 0)
+        if not item:
+            return
+        exp_data = item.data(Qt.ItemDataRole.UserRole)
+        if not exp_data or not isinstance(exp_data, dict):
+            return
+
+        dlg = GiderDuzenleDialog(
+            expense_data=exp_data,
+            expense_db=self.expense_db,
+            dropbox_sync=self.dropbox_sync,
+            parent=self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._refresh_recent_expenses()
+            self._refresh_categories_table()
+            self._calculate_summary()
+            if hasattr(self, "lbl_save_status"):
+                self.lbl_save_status.setText("✓ Gider kaydı başarıyla güncellendi.")
 
     def _refresh_categories_combo(self):
         current_cat = self.combo_expense_cat.currentText()
@@ -1487,11 +2167,15 @@ class GiderYonetimiWidget(QWidget):
             disp_date = parsed.strftime("%d.%m.%Y") if parsed else dt_str
             item_d = QTableWidgetItem(disp_date)
             item_d.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_d.setData(Qt.ItemDataRole.UserRole, exp)
+            item_d.setToolTip("💡 Gider bilgilerini düzenlemek için çift tıklayın")
             self.table_recent_expenses.setItem(row, 0, item_d)
 
             # 1: Kategori
             item_c = QTableWidgetItem(str(exp.get("category", "")))
             item_c.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_c.setData(Qt.ItemDataRole.UserRole, exp)
+            item_c.setToolTip("💡 Gider bilgilerini düzenlemek için çift tıklayın")
             self.table_recent_expenses.setItem(row, 1, item_c)
 
             # 2: Tutar
@@ -1499,11 +2183,15 @@ class GiderYonetimiWidget(QWidget):
             item_a = QTableWidgetItem(f"{amt:,.2f} TL")
             item_a.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             item_a.setForeground(Qt.GlobalColor.yellow)
+            item_a.setData(Qt.ItemDataRole.UserRole, exp)
+            item_a.setToolTip("💡 Gider bilgilerini düzenlemek için çift tıklayın")
             self.table_recent_expenses.setItem(row, 2, item_a)
 
             # 3: Açıklama
             desc = str(exp.get("description", ""))
             item_desc = QTableWidgetItem(desc)
+            item_desc.setData(Qt.ItemDataRole.UserRole, exp)
+            item_desc.setToolTip("💡 Gider bilgilerini düzenlemek için çift tıklayın")
             self.table_recent_expenses.setItem(row, 3, item_desc)
 
             # 4: Sil Butonu
@@ -1612,10 +2300,10 @@ class GiderYonetimiWidget(QWidget):
         btn_this_month.clicked.connect(self._preset_this_month)
         filter_layout.addWidget(btn_this_month)
 
-        btn_last_30 = QPushButton("Son 30 Gün")
-        btn_last_30.setStyleSheet("padding: 4px 8px; font-size: 11px; background-color: #334155;")
-        btn_last_30.clicked.connect(self._preset_last_30_days)
-        filter_layout.addWidget(btn_last_30)
+        btn_last_month = QPushButton("Geçen Ay")
+        btn_last_month.setStyleSheet("padding: 4px 8px; font-size: 11px; background-color: #334155;")
+        btn_last_month.clicked.connect(self._preset_last_month)
+        filter_layout.addWidget(btn_last_month)
 
         btn_this_year = QPushButton("Bu Yıl")
         btn_this_year.setStyleSheet("padding: 4px 8px; font-size: 11px; background-color: #334155;")
@@ -1694,11 +2382,11 @@ class GiderYonetimiWidget(QWidget):
 
         layout.addLayout(cards_layout)
 
-        # 3. Görsel Finansal Oran Göstergesi (Gelir vs Gider Dağılım Çubuğu)
+        # 3. Görsel Finansal Oran Göstergesi (Modern İki Parçalı Gelir vs Gider Dağılım Çubuğu)
         ratio_frame = QFrame()
-        ratio_frame.setStyleSheet("background-color: #0F172A; border: 1px solid #334155; border-radius: 8px; padding: 10px 14px;")
+        ratio_frame.setStyleSheet("background-color: #0F172A; border: 1px solid #334155; border-radius: 8px; padding: 12px 14px;")
         ratio_layout = QVBoxLayout(ratio_frame)
-        ratio_layout.setSpacing(6)
+        ratio_layout.setSpacing(8)
 
         ratio_header = QHBoxLayout()
         self.lbl_ratio_text = QLabel("Finansal Dağılım Oranı (Gelir vs Gider):")
@@ -1710,16 +2398,8 @@ class GiderYonetimiWidget(QWidget):
         ratio_header.addWidget(self.lbl_ratio_percent)
         ratio_layout.addLayout(ratio_header)
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(50)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setFixedHeight(12)
-        self.progress_bar.setStyleSheet(
-            "QProgressBar { background-color: #F59E0B; border-radius: 6px; border: none; } "
-            "QProgressBar::chunk { background-color: #10B981; border-radius: 6px; }"
-        )
-        ratio_layout.addWidget(self.progress_bar)
+        self.ratio_bar = ModernFinancialRatioBar()
+        ratio_layout.addWidget(self.ratio_bar)
         layout.addWidget(ratio_frame)
 
         # 4. Kategori Bazlı Gider Dağılımı Tablosu
@@ -1749,12 +2429,24 @@ class GiderYonetimiWidget(QWidget):
         self.dash_date_to.setDate(QDate(today.year, today.month, today.day))
         self._calculate_summary()
 
-    def _preset_last_30_days(self):
+    def _preset_last_month(self):
+        """Takvimsel olarak tam bir önceki ayı (1'i ile son günü) kapsayan filtreyi ayarlar."""
         today = datetime.today()
-        past = today - timedelta(days=30)
-        self.dash_date_from.setDate(QDate(past.year, past.month, past.day))
-        self.dash_date_to.setDate(QDate(today.year, today.month, today.day))
+        if today.month == 1:
+            prev_year = today.year - 1
+            prev_month = 12
+        else:
+            prev_year = today.year
+            prev_month = today.month - 1
+
+        last_day_num = calendar.monthrange(prev_year, prev_month)[1]
+        self.dash_date_from.setDate(QDate(prev_year, prev_month, 1))
+        self.dash_date_to.setDate(QDate(prev_year, prev_month, last_day_num))
         self._calculate_summary()
+
+    def _preset_last_30_days(self):
+        """Geriye dönük uyumluluk için alias."""
+        self._preset_last_month()
 
     def _preset_this_year(self):
         today = datetime.today()
@@ -1835,15 +2527,14 @@ class GiderYonetimiWidget(QWidget):
             self.lbl_net_sub.setText("⚠️ Giderler toplam geliri aştı!")
             self.lbl_net_sub.setStyleSheet("font-size: 11px; color: #FCA5A5; font-weight: bold;")
 
-        # Oran Çubuğunu Güncelle
+        # Oran Çubuğunu Güncelle (Modern İki Parçalı Bileşen)
+        self.ratio_bar.set_values(total_income, total_expense)
         grand_total = total_income + total_expense
         if grand_total > 0:
-            income_pct = int((total_income / grand_total) * 100)
-            expense_pct = 100 - income_pct
-            self.progress_bar.setValue(income_pct)
-            self.lbl_ratio_percent.setText(f"Gelir: %{income_pct} (Yeşil)  |  Gider: %{expense_pct} (Turuncu)")
+            income_pct = (total_income / grand_total) * 100.0
+            expense_pct = (total_expense / grand_total) * 100.0
+            self.lbl_ratio_percent.setText(f"Gelir: %{income_pct:.1f} ({total_income:,.2f} TL)  |  Gider: %{expense_pct:.1f} ({total_expense:,.2f} TL)")
         else:
-            self.progress_bar.setValue(50)
             self.lbl_ratio_percent.setText("Gelir: %0  |  Gider: %0")
 
         # 4. Kategori Bazlı Dağılım Tablosu

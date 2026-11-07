@@ -1,2 +1,7 @@
 __pycache__/
 TasımaBelgeler/
+config.json
+update.bat
+guncel_fatura.exe
+*.old
+*.old.exe

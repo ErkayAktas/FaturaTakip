@@ -24,7 +24,7 @@ from src.database import get_app_base_dir
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "v1.0.5"
+APP_VERSION = "1.0.5"
 CURRENT_VERSION = f"v{APP_VERSION}"
 
 
@@ -96,30 +96,31 @@ def cleanup_old_files(app_dir: Optional[str] = None) -> List[str]:
     return cleaned_files
 
 
-def generate_update_bat_script(target_exe_name: str, temp_exe_name: str) -> str:
-    """Windows icin guvenli dosya degisimi ve yeniden baslatma .bat betigi olusturur."""
+def generate_update_bat_script(target_exe_name: str, new_exe_name: str = "guncel_fatura.exe") -> str:
+    """Windows icin harici dosya degisimi ve otomatik yeniden baslatma .bat betigi olusturur."""
     return f"""@echo off
 chcp 65001 > nul
-
-:: 1. Eski uygulamanin sonlanmasi icin bekle
-timeout /t 1 /nobreak > nul 2>&1 || ping 127.0.0.1 -n 2 > nul
-
-:: 2. Calisma dizinine gec
 cd /d "%~dp0"
 
-:: 3. Eger Python seviyesinde dosya degisimi henuz yapilmamissa guvence olarak yap
-if exist "{temp_exe_name}" (
-    if exist "{target_exe_name}" (
-        if exist "{target_exe_name}.old" del /f /q "{target_exe_name}.old" > nul 2>&1
-        ren "{target_exe_name}" "{target_exe_name}.old" > nul 2>&1
-    )
-    ren "{temp_exe_name}" "{target_exe_name}" > nul 2>&1
+:: 1. Calisan uygulamanin sonlanmasi ve dosya kilidinin kalkmasi icin 2 saniye bekle
+ping 127.0.0.1 -n 3 > nul
+
+:: 2. Calisan orijinal uygulamanin .exe dosyasini sil / .old yap
+if exist "{target_exe_name}.old" del /f /q "{target_exe_name}.old" > nul 2>&1
+if exist "{target_exe_name}" (
+    ren "{target_exe_name}" "{target_exe_name}.old" > nul 2>&1
+    if exist "{target_exe_name}" del /f /q "{target_exe_name}" > nul 2>&1
 )
 
-:: 4. Yeni surumu baslat
+:: 3. guncel_fatura.exe dosyasinin adini orijinal uygulama adi yap
+if exist "{new_exe_name}" (
+    ren "{new_exe_name}" "{target_exe_name}" > nul 2>&1
+)
+
+:: 4. Yeni guncel uygulamayi baslat
 start "" "{target_exe_name}"
 
-:: 5. updater.bat betigini temizle
+:: 5. update.bat kendini temizlesin
 del "%~f0" > nul 2>&1
 """
 
@@ -278,6 +279,27 @@ class AutoUpdater:
         """Sürüm karşılaştırma fonksiyonu."""
         return is_newer_version(current, latest)
 
+    def _close_checking_dialog(self):
+        """Güncelleme kontrol diyaloğunu güvenli şekilde kapatır."""
+        self._is_checking = False
+        if self.checking_dialog:
+            try:
+                self.checking_dialog.close()
+                self.checking_dialog.deleteLater()
+            except Exception:
+                pass
+            self.checking_dialog = None
+
+    def _show_error(self, title: str, message: str):
+        """Hata diyaloğunu GUI thread üzerinde gösterir."""
+        self._close_checking_dialog()
+        QMessageBox.critical(self.parent_widget, title, message)
+
+    def _show_info(self, title: str, message: str):
+        """Bilgi diyaloğunu GUI thread üzerinde gösterir."""
+        self._close_checking_dialog()
+        QMessageBox.information(self.parent_widget, title, message)
+
     def check_for_updates(self, silent_if_latest: bool = True):
         """
         GitHub üzerinden güncellemeleri denetler.
@@ -294,57 +316,79 @@ class AutoUpdater:
             self.checking_dialog.show()
             QApplication.processEvents()
 
-        def _close_checking_dialog():
-            self._is_checking = False
-            if hasattr(self, "checking_dialog") and self.checking_dialog:
-                try:
-                    self.checking_dialog.close()
-                    self.checking_dialog.deleteLater()
-                except Exception:
-                    pass
-                self.checking_dialog = None
-
         def run_check():
             try:
+                # 1. API İSTEĞİ: GitHub Releases Latest endpoint
                 headers = self.headers.copy()
+                logger.info(f"Güncelleme kontrolü başlatılıyor: {self.github_url}")
+
                 try:
-                    res = requests.get(self.github_url, headers=headers, timeout=10)
-                    if res.status_code == 401 and "Authorization" in headers:
-                        headers.pop("Authorization", None)
-                        res = requests.get(self.github_url, headers=headers, timeout=10)
-                except Exception as req_err:
-                    raise req_err
+                    res = requests.get(self.github_url, headers=headers, timeout=15)
+                except requests.exceptions.ConnectionError as conn_err:
+                    raise RuntimeError(f"Sunucuya bağlanılamadı (İnternet bağlantınızı kontrol edin):\n{conn_err}")
+                except requests.exceptions.Timeout:
+                    raise RuntimeError("Sunucuya bağlantı zaman aşımına uğradı (15 saniye).")
+
+                # Token 401 hatası alırsa tokensiz tekrar dene
+                if res.status_code == 401 and "Authorization" in headers:
+                    logger.warning("GitHub API 401 döndü, token olmadan tekrar deneniyor...")
+                    headers.pop("Authorization", None)
+                    res = requests.get(self.github_url, headers=headers, timeout=15)
+
+                # 2. HTTP DURUM KODU KONTROLÜ
+                if res.status_code == 403:
+                    rate_reset = res.headers.get("X-RateLimit-Reset", "")
+                    remaining = res.headers.get("X-RateLimit-Remaining", "?")
+                    msg = f"GitHub API istek limiti aşıldı (HTTP 403).\nKalan istek hakkı: {remaining}"
+                    if rate_reset:
+                        try:
+                            reset_time = time.strftime('%H:%M:%S', time.localtime(int(rate_reset)))
+                            msg += f"\nLimit sıfırlanma zamanı: {reset_time}"
+                        except Exception:
+                            pass
+                    raise RuntimeError(msg)
 
                 if res.status_code == 404:
-                    logger.warning("No release found or repository is inaccessible.")
-                    if not silent_if_latest:
-                        QTimer.singleShot(
-                            0,
-                            lambda: (
-                                _close_checking_dialog(),
-                                QMessageBox.critical(
-                                    self.parent_widget,
-                                    "Hata",
-                                    "Güncelleme sunucusunda yayın (Release) bulunamadı.\n(GitHub 404 Not Found)",
-                                ),
-                            ),
-                        )
-                    else:
-                        _close_checking_dialog()
-                    return
+                    raise RuntimeError(
+                        "Sürüm bilgisi alınamadı:\n"
+                        "GitHub deposunda yayınlanmış Release bulunamadı.\n"
+                        "(HTTP 404 Not Found)"
+                    )
 
-                res.raise_for_status()
-                data = res.json()
+                if res.status_code != 200:
+                    raise RuntimeError(
+                        f"Sürüm bilgisi alınamadı:\n"
+                        f"GitHub API beklenmeyen yanıt döndü (HTTP {res.status_code}).\n"
+                        f"Yanıt: {res.text[:200]}"
+                    )
 
-                latest_version = data.get("tag_name", CURRENT_VERSION).strip()
-                logger.info(f"Current version: {CURRENT_VERSION}, Latest release: {latest_version}")
+                # 3. JSON PARSE
+                try:
+                    data = res.json()
+                except Exception as json_err:
+                    raise RuntimeError(f"Sürüm bilgisi alınamadı:\nGitHub API yanıtı JSON olarak ayrıştırılamadı:\n{json_err}")
 
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"Sürüm bilgisi alınamadı:\nGitHub API beklenen formatta veri döndürmedi.")
+
+                latest_version = data.get("tag_name", "").strip()
+                if not latest_version:
+                    raise RuntimeError("Sürüm bilgisi alınamadı:\nGitHub Release'de 'tag_name' alanı bulunamadı.")
+
+                logger.info(f"Mevcut sürüm: {CURRENT_VERSION}, GitHub'daki en son sürüm: {latest_version}")
+
+                # 4. SÜRÜM KARŞILAŞTIRMASI
                 if self.is_newer_version(CURRENT_VERSION, latest_version):
                     self.is_update_available = True
                     self.latest_release_data = data
                     if hasattr(self.parent, "on_new_update_detected"):
                         QTimer.singleShot(0, lambda: self.parent.on_new_update_detected(data))
-                    QTimer.singleShot(0, lambda: (_close_checking_dialog(), self.prompt_update(data)))
+
+                    def _on_new_version_found():
+                        self._close_checking_dialog()
+                        self.prompt_update(data)
+
+                    QTimer.singleShot(0, _on_new_version_found)
                 else:
                     self.is_update_available = False
                     self.latest_release_data = None
@@ -353,33 +397,27 @@ class AutoUpdater:
                     if not silent_if_latest:
                         QTimer.singleShot(
                             0,
-                            lambda: (
-                                _close_checking_dialog(),
-                                QMessageBox.information(
-                                    self.parent_widget,
-                                    "Güncelleme",
-                                    f"Uygulamanız güncel.\nMevcut Sürüm: {CURRENT_VERSION}",
-                                ),
+                            lambda: self._show_info(
+                                "Güncelleme",
+                                f"Uygulamanız güncel.\nMevcut Sürüm: {CURRENT_VERSION}",
                             ),
                         )
                     else:
-                        _close_checking_dialog()
+                        QTimer.singleShot(0, self._close_checking_dialog)
+
             except Exception as e:
-                logger.error(f"Error checking for updates: {e}")
+                error_msg = str(e)
+                logger.error(f"Güncelleme kontrolü hatası: {error_msg}")
                 if not silent_if_latest:
                     QTimer.singleShot(
                         0,
-                        lambda err=str(e): (
-                            _close_checking_dialog(),
-                            QMessageBox.critical(
-                                self.parent_widget,
-                                "Güncelleme Hatası",
-                                f"Güncelleme kontrolü sırasında hata oluştu:\n{err}",
-                            ),
+                        lambda err=error_msg: self._show_error(
+                            "Güncelleme Hatası",
+                            f"Güncelleme kontrolü sırasında hata oluştu:\n{err}",
                         ),
                     )
                 else:
-                    _close_checking_dialog()
+                    QTimer.singleShot(0, self._close_checking_dialog)
 
         threading.Thread(target=run_check, daemon=True).start()
 
@@ -433,12 +471,21 @@ class AutoUpdater:
             QMessageBox.critical(
                 self.parent_widget,
                 "Güncelleme Hatası",
-                "Güncelleme sırasında hata oluştu:\nSürümde indirilebilir uygulama dosyası (.exe) bulunamadı.",
+                "Dosya indirme hatası:\nSürümde indirilebilir uygulama dosyası (.exe) bulunamadı.\n\n"
+                f"Release 'assets' sayısı: {len(assets)}",
             )
             return
 
         # GitHub token ile indirme yapabilmek için varsa asset API url'si
         download_url = exe_asset.get("url") or exe_asset.get("browser_download_url")
+        if not download_url:
+            QMessageBox.critical(
+                self.parent_widget,
+                "Güncelleme Hatası",
+                "Dosya indirme hatası:\nAsset dosyası için geçerli bir indirme URL'si bulunamadı.",
+            )
+            return
+
         asset_headers = self.headers.copy()
         if "/assets/" in str(download_url):
             asset_headers["Accept"] = "application/octet-stream"
@@ -457,9 +504,9 @@ class AutoUpdater:
         if not target_exe_name.lower().endswith(".exe"):
             target_exe_name = f"{target_exe_name}.exe"
 
-        # İndirme için geçici dosya yolu
-        temp_exe_name = "yeni_surum_temp.exe"
-        temp_exe_path = os.path.join(current_dir, temp_exe_name)
+        # İndirme için hedef dosya adı: guncel_fatura.exe
+        new_exe_name = "guncel_fatura.exe"
+        new_exe_path = os.path.join(current_dir, new_exe_name)
 
         # Progress Bar Penceresi
         self.progress_win = UpdateProgressBarDialog(self.parent_widget)
@@ -467,25 +514,37 @@ class AutoUpdater:
 
         def do_download():
             try:
-                res = requests.get(download_url, headers=asset_headers, stream=True, timeout=60)
+                try:
+                    res = requests.get(download_url, headers=asset_headers, stream=True, timeout=60)
+                except requests.exceptions.ConnectionError as conn_err:
+                    raise RuntimeError(f"Dosya indirme hatası:\nSunucuya bağlanılamadı:\n{conn_err}")
+                except requests.exceptions.Timeout:
+                    raise RuntimeError("Dosya indirme hatası:\nİndirme zaman aşımına uğradı (60 saniye).")
+
                 if res.status_code == 401 and "Authorization" in asset_headers:
                     asset_headers.pop("Authorization", None)
                     res = requests.get(download_url, headers=asset_headers, stream=True, timeout=60)
-                res.raise_for_status()
+
+                if res.status_code != 200:
+                    raise RuntimeError(
+                        f"Dosya indirme hatası:\n"
+                        f"Sunucu HTTP {res.status_code} yanıtı döndü.\n"
+                        f"URL: {download_url[:100]}"
+                    )
 
                 total_size = int(res.headers.get("content-length", 0))
 
-                # Varsa eski yarım kalmış geçici dosyayı temizle
-                if os.path.exists(temp_exe_path):
+                # Varsa eski yarım kalmış guncel_fatura.exe dosyasını temizle
+                if os.path.exists(new_exe_path):
                     try:
-                        os.remove(temp_exe_path)
+                        os.remove(new_exe_path)
                     except Exception as e:
-                        logger.warning(f"Eski geçici dosya temizlenemedi: {e}")
+                        logger.warning(f"Eski indirme dosyası temizlenemedi: {e}")
 
                 bytes_downloaded = 0
                 chunk_size = 1024 * 64
 
-                with open(temp_exe_path, "wb") as f:
+                with open(new_exe_path, "wb") as f:
                     for chunk in res.iter_content(chunk_size=chunk_size):
                         if chunk:
                             f.write(chunk)
@@ -500,30 +559,33 @@ class AutoUpdater:
                                 )
 
                 # İndirilen dosya doğrulaması
-                if not os.path.exists(temp_exe_path) or os.path.getsize(temp_exe_path) == 0:
-                    raise RuntimeError("İndirilen güncelleme dosyası doğrulanamadı veya boş.")
+                if not os.path.exists(new_exe_path) or os.path.getsize(new_exe_path) == 0:
+                    raise RuntimeError("Dosya indirme hatası:\nİndirilen güncelleme dosyası doğrulanamadı veya boş (0 bayt).")
+
+                logger.info(f"İndirme tamamlandı: {bytes_downloaded} bayt -> {new_exe_path}")
 
                 if self.progress_win:
                     QTimer.singleShot(0, self.progress_win.close)
 
-                # İndirme bittiğinde güvenli dosya değişimi ve yeniden başlatma
+                # İndirme bittiğinde harici .bat dosyası oluştur ve hot-swap geçişini başlat
                 QTimer.singleShot(
-                    100, lambda: self.apply_update_and_restart(current_dir, target_exe_name, temp_exe_name)
+                    100, lambda: self.apply_update_and_restart(current_dir, target_exe_name, new_exe_name)
                 )
 
             except Exception as e:
-                logger.error(f"Download failed: {e}")
-                # İndirmeyi iptal et ve geçici dosyayı sil
-                if os.path.exists(temp_exe_path):
+                error_msg = str(e)
+                logger.error(f"İndirme hatası: {error_msg}")
+                # İndirmeyi iptal et ve yarım kalan dosyayı sil
+                if os.path.exists(new_exe_path):
                     try:
-                        os.remove(temp_exe_path)
+                        os.remove(new_exe_path)
                     except Exception:
                         pass
                 if self.progress_win:
                     QTimer.singleShot(0, self.progress_win.close)
                 QTimer.singleShot(
                     0,
-                    lambda err=str(e): QMessageBox.critical(
+                    lambda err=error_msg: QMessageBox.critical(
                         self.parent_widget,
                         "Güncelleme Hatası",
                         f"Güncelleme sırasında hata oluştu:\n{err}",
@@ -532,99 +594,69 @@ class AutoUpdater:
 
         threading.Thread(target=do_download, daemon=True).start()
 
-    def apply_update_and_restart(self, current_dir: str, target_exe_name: str, temp_exe_name: str):
+    def apply_update_and_restart(self, current_dir: str, target_exe_name: str, new_exe_name: str = "guncel_fatura.exe"):
         """
-        PyInstaller --onefile yapısına uygun olarak güvenli dosya değişimi ve yeniden başlatma:
-        1. Çalışan mevcut .exe dosyasının adını değiştir (.old ekle).
-        2. İndirilen yeni .exe dosyasını orijinal isimle kaydet.
-        3. Dosya değişiminin başarılı olup olmadığını doğrula (Validation).
-        4. Başarılıysa kullanıcıya bilgi verip yeniden başlat; hata varsa rollback yapıp pop-up göster.
+        Harici update.bat Dosyası ile Hot-Swap Güncelleme Sistemi:
+        Windows dosya kilitlerini (file lock) aşmak için en stabil yöntem olan harici .bat mantığı:
+        1. İndirilen guncel_fatura.exe dosyasının varlığı ve bütünlüğü doğrulanır.
+        2. Geçici update.bat dosyası oluşturulur:
+           - ping 127.0.0.1 -n 3 > nul ile 2 saniye beklenir (mevcut uygulamanın tamamen kapanması için).
+           - Çalışan orijinal uygulamanın .exe dosyası .old yapılır veya silinir.
+           - guncel_fatura.exe dosyasının adı orijinal uygulama adı yapılır.
+           - Yeni uygulama başlatılır.
+           - update.bat kendini siler.
+        3. Python içinden subprocess.Popen('update.bat', shell=True) çalıştırılır.
+        4. Mevcut PyQt6 uygulaması hemen kapatılır (QApplication.quit() ve sys.exit()).
+        Her adım try-except ile denetlenir ve hata durumunda kullanıcıya QMessageBox pop-up gösterilir.
         """
-        current_exe_path = os.path.join(current_dir, target_exe_name) if not os.path.isabs(target_exe_name) else target_exe_name
-        target_name_only = os.path.basename(current_exe_path)
-        temp_exe_path = os.path.join(current_dir, temp_exe_name) if not os.path.isabs(temp_exe_name) else temp_exe_name
-        old_exe_path = os.path.join(current_dir, f"{target_name_only}.old")
-
-        rename_old_done = False
         try:
-            # 1. İndirilen dosya doğrulaması
-            if not os.path.exists(temp_exe_path) or os.path.getsize(temp_exe_path) == 0:
-                raise RuntimeError("İndirilen yeni sürüm dosyası bulunamadı veya boş (0 bayt).")
+            target_name_only = os.path.basename(target_exe_name)
+            new_exe_path = os.path.join(current_dir, new_exe_name)
 
-            # 2. Varsa eski .old dosyasını temizle
-            if os.path.exists(old_exe_path):
-                try:
-                    os.remove(old_exe_path)
-                except Exception as e:
-                    logger.warning(f"Eski .old dosyası silinemedi: {e}")
-                    old_exe_path = os.path.join(current_dir, f"{target_name_only}.{int(time.time())}.old")
-                    if os.path.exists(old_exe_path):
-                        os.remove(old_exe_path)
+            # 1. Dosya doğrulaması
+            if not os.path.exists(new_exe_path) or os.path.getsize(new_exe_path) == 0:
+                raise RuntimeError("İndirilen yeni sürüm dosyası (guncel_fatura.exe) bulunamadı veya boş (0 bayt).")
 
-            # 3. Çalışan mevcut .exe dosyasının adını değiştir (.old ekle)
-            if os.path.exists(current_exe_path):
-                os.rename(current_exe_path, old_exe_path)
-                rename_old_done = True
-                logger.info(f"Mevcut .exe başarıyla .old yapıldı: {old_exe_path}")
+            # 2. Geçici update.bat dosyasını hazırla
+            bat_content = generate_update_bat_script(target_name_only, new_exe_name)
+            bat_path = os.path.join(current_dir, "update.bat")
 
-            # 4. İndirilen yeni dosyayı orijinal isimle kaydet
-            os.rename(temp_exe_path, current_exe_path)
-            logger.info(f"Yeni sürüm orijinal isimle kaydedildi: {current_exe_path}")
-
-            # 5. DOĞRULAMA (VALIDATION):
-            if not os.path.exists(current_exe_path) or os.path.getsize(current_exe_path) == 0:
-                raise RuntimeError("Dosya değişimi doğrulanamadı: Yeni sürüm dosyası oluşturulamadı.")
-
-            # Başarılı doğrulama!
-            logger.info("Güncelleme doğrulandı ve başarıyla tamamlandı.")
-            QMessageBox.information(
-                self.parent_widget,
-                "Güncelleme",
-                "Güncelleme başarıyla tamamlandı, uygulama yeniden başlatılıyor.",
-            )
-
-            # 6. Uygulamayı yeniden başlat
-            bat_content = generate_update_bat_script(target_name_only, os.path.basename(temp_exe_path))
-            updater_bat_path = os.path.join(current_dir, "updater.bat")
-
-            with open(updater_bat_path, "w", encoding="utf-8") as f:
+            with open(bat_path, "w", encoding="utf-8") as f:
                 f.write(bat_content)
 
+            logger.info(f"update.bat başarıyla oluşturuldu: {bat_path}")
+
+            # Kullanıcıya bilgilendirme kutusu göster
+            QMessageBox.information(
+                self.parent_widget,
+                "Güncelleme Hazır",
+                "Güncelleme başarıyla indirildi.\n\n"
+                "Uygulama kapatılacak ve yeni sürüm 2 saniye içinde otomatik olarak başlatılacaktır.",
+            )
+
+            # 3. Harici .bat dosyasını tetikle
             if sys.platform.startswith("win"):
-                subprocess.Popen(
-                    ["cmd.exe", "/c", "updater.bat"],
-                    cwd=current_dir,
-                    creationflags=subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, "CREATE_NEW_CONSOLE") else 0,
-                )
-                if self.parent:
-                    try:
-                        self.parent.close()
-                    except Exception:
-                        pass
-                os._exit(0)
+                creation_flags = 0
+                if hasattr(subprocess, "CREATE_NEW_CONSOLE"):
+                    creation_flags |= subprocess.CREATE_NEW_CONSOLE
+                subprocess.Popen("update.bat", shell=True, cwd=current_dir, creationflags=creation_flags)
             else:
-                logger.info(f"macOS/Linux: Güncelleme tamamlandı. Yeni sürüm: {current_exe_path}")
+                logger.info(f"macOS/Linux: update.bat hazırlandı -> {bat_path}")
 
-        except Exception as e:
-            logger.error(f"Dosya değişimi sırasında hata: {e}", exc_info=True)
-            # Rollback: Eski dosya .old yapıldıysa ve hedef dosya yoksa eski dosyayı geri getir
-            if rename_old_done and os.path.exists(old_exe_path) and not os.path.exists(current_exe_path):
+            # 4. Mevcut uygulamayı hemen kapat
+            if self.parent:
                 try:
-                    os.rename(old_exe_path, current_exe_path)
-                    logger.info("Geri alma (Rollback) başarılı: Eski .exe restore edildi.")
-                except Exception as rb_err:
-                    logger.error(f"Rollback hatası: {rb_err}")
-
-            # İndirilen geçici dosyayı temizle (indirmeyi iptal et)
-            if os.path.exists(temp_exe_path):
-                try:
-                    os.remove(temp_exe_path)
+                    self.parent.close()
                 except Exception:
                     pass
+            QApplication.quit()
+            sys.exit(0)
 
-            # Hata durumunda kullanıcıya pop-up sağla
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Güncelleme kurulum hatası: {error_msg}", exc_info=True)
             QMessageBox.critical(
                 self.parent_widget,
                 "Güncelleme Hatası",
-                f"Güncelleme sırasında hata oluştu:\n{str(e)}",
+                f"Güncelleme kurulumu başlatılırken hata oluştu:\n{error_msg}",
             )

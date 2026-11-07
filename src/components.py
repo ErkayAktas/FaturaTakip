@@ -30,6 +30,10 @@ class CustomInvoiceRowDelegate(QStyledItemDelegate):
 
     def editorEvent(self, event, model, option, index):
         """Kullanıcı fare veya klavye ile onay kutusuna tıkladığında veya boşluk tuşuna bastığında durumu güncelle."""
+        # Checkbox işlemi yalnızca 0. sütun (en sol) için geçerli
+        if index.column() != 0:
+            return super().editorEvent(event, model, option, index)
+
         flags = model.flags(index)
         if not (flags & Qt.ItemFlag.ItemIsUserCheckable) or not (flags & Qt.ItemFlag.ItemIsEnabled):
             return super().editorEvent(event, model, option, index)
@@ -107,35 +111,37 @@ class CustomInvoiceRowDelegate(QStyledItemDelegate):
         painter.setPen(QColor("#CBD5E1") if not is_selected else QColor("#2563EB"))
         painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
 
-        # Checkbox Sütunu (Sütun 0 ve CheckStateRole tanımlıysa)
-        check_state = index.data(Qt.ItemDataRole.CheckStateRole)
-        if check_state is not None:
-            box_size = 18
-            cx = option.rect.x() + (option.rect.width() - box_size) // 2
-            cy = option.rect.y() + (option.rect.height() - box_size) // 2
-            box_rect = QRect(cx, cy, box_size, box_size)
+        # Checkbox Sütunu — YALNIZCA 0. sütun (en sol) için çiz
+        # Diğer sütunlarda CheckStateRole verisi olsa bile checkbox çizilmez, metin gösterilir.
+        if index.column() == 0:
+            check_state = index.data(Qt.ItemDataRole.CheckStateRole)
+            if check_state is not None:
+                box_size = 18
+                cx = option.rect.x() + (option.rect.width() - box_size) // 2
+                cy = option.rect.y() + (option.rect.height() - box_size) // 2
+                box_rect = QRect(cx, cy, box_size, box_size)
 
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            is_checked = bool(check_state == Qt.CheckState.Checked or check_state == Qt.CheckState.Checked.value or check_state == 2)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                is_checked = bool(check_state == Qt.CheckState.Checked or check_state == Qt.CheckState.Checked.value or check_state == 2)
 
-            if is_checked:
-                painter.setBrush(QColor("#0284C7"))
-                painter.setPen(QColor("#0284C7"))
-                painter.drawRoundedRect(box_rect, 4, 4)
+                if is_checked:
+                    painter.setBrush(QColor("#0284C7"))
+                    painter.setPen(QColor("#0284C7"))
+                    painter.drawRoundedRect(box_rect, 4, 4)
 
-                painter.setPen(QColor("#FFFFFF"))
-                pen = painter.pen()
-                pen.setWidth(2)
-                painter.setPen(pen)
-                painter.drawLine(QPoint(cx + 4, cy + 9), QPoint(cx + 8, cy + 13))
-                painter.drawLine(QPoint(cx + 8, cy + 13), QPoint(cx + 14, cy + 5))
-            else:
-                painter.setBrush(QColor("#1E293B" if is_selected else "#FFFFFF"))
-                painter.setPen(QColor("#93C5FD" if is_selected else "#94A3B8"))
-                painter.drawRoundedRect(box_rect, 4, 4)
+                    painter.setPen(QColor("#FFFFFF"))
+                    pen = painter.pen()
+                    pen.setWidth(2)
+                    painter.setPen(pen)
+                    painter.drawLine(QPoint(cx + 4, cy + 9), QPoint(cx + 8, cy + 13))
+                    painter.drawLine(QPoint(cx + 8, cy + 13), QPoint(cx + 14, cy + 5))
+                else:
+                    painter.setBrush(QColor("#1E293B" if is_selected else "#FFFFFF"))
+                    painter.setPen(QColor("#93C5FD" if is_selected else "#94A3B8"))
+                    painter.drawRoundedRect(box_rect, 4, 4)
 
-            painter.restore()
-            return
+                painter.restore()
+                return
 
         # 2. Standart Metni boya
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")

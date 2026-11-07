@@ -1,5 +1,5 @@
 # Sürüm Kontrol Sistemi (Version Checking)
-APP_VERSION = "v1.0.5"
+APP_VERSION = "1.0.5"
 
 import ctypes
 import os
@@ -36,8 +36,10 @@ from PyQt6.QtWidgets import (
 from src.components import DateTableWidgetItem, NumericTableWidgetItem, SortableTableWidget, StatCard
 from src.database import ExpenseDatabase, InvoiceDatabase, get_app_base_dir, sanitize_date_str
 from src.dialogs import (
+    DropboxAyarlariDialog,
     GiderYonetimiDialog,
     GiderYonetimiWidget,
+    NakitDuzenleDialog,
     NakitGirisDialog,
     OdemeGirisDialog,
     TopluOdemeDialog,
@@ -52,11 +54,45 @@ from src.styles import COLORS, MAIN_STYLE_SHEET
 from src.updater import APP_VERSION, CURRENT_VERSION, AutoUpdater
 
 # Windows Görev Çubuğu (Taskbar) Simgesi: AppUserModelID tanımlanmalıdır
-if sys.platform.startswith("win"):
+if sys.platform == "win32" or sys.platform.startswith("win"):
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("faturatakip.lojistik.app.v1.0")
+        myappid = "erkayaktas.faturatakip.app.v1"  # Benzersiz uygulama ID'si
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     except Exception as e:
         print(f"[Taskbar Icon Hatası] {e}")
+
+
+def get_icon_path() -> Optional[str]:
+    """
+    Uygulama ikon dosyasını (icon.ico) arar ve tam yolunu döner.
+    1. PyInstaller ile derlenmiş geçici dizin (sys._MEIPASS).
+    2. Çalışan .exe dosyasının bulunduğu dizin (sys.executable).
+    3. get_app_base_dir() ve kaynak kod dizini.
+    """
+    candidates = []
+
+    # 1. PyInstaller geçici açılma dizini (_MEIPASS)
+    if hasattr(sys, "_MEIPASS"):
+        candidates.append(os.path.join(sys._MEIPASS, "icon.ico"))
+
+    # 2. Çalışan uygulamanın (.exe) bulunduğu dizin
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates.append(os.path.join(exe_dir, "icon.ico"))
+
+    # 3. get_app_base_dir() ve dosya dizini
+    try:
+        candidates.append(os.path.join(get_app_base_dir(), "icon.ico"))
+    except Exception:
+        pass
+
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico"))
+
+    for p in candidates:
+        if p and os.path.exists(p):
+            return os.path.abspath(p)
+
+    return None
 
 
 class FaturaTakipApp(QMainWindow):
@@ -75,8 +111,8 @@ class FaturaTakipApp(QMainWindow):
         AutoUpdater.cleanup_old_files(self.base_dir)
 
         # Windows / macOS Görev Çubuğu ve Pencere Simgesi (Taskbar Icon)
-        icon_path = os.path.join(self.base_dir, "icon.ico")
-        if os.path.exists(icon_path):
+        icon_path = get_icon_path()
+        if icon_path:
             self.setWindowIcon(QIcon(icon_path))
 
         # Veritabanı ve Dizin İzleme Servisi
@@ -102,6 +138,9 @@ class FaturaTakipApp(QMainWindow):
         self._setup_ui()
         self._setup_watcher()
         self.refresh_all_tabs()
+
+        if not self.dropbox_sync.is_configured():
+            self.status_bar.showMessage("⚠️ Ayarlar menüsünden Dropbox API bilgilerini giriniz", 8000)
 
         # Uygulama açılışında arka planda sessiz güncelleme kontrolü
         QTimer.singleShot(2000, lambda: self.updater.check_for_updates(silent_if_latest=True))
@@ -353,11 +392,18 @@ class FaturaTakipApp(QMainWindow):
         layout.addWidget(self.btn_expenses)
 
         # Güncellemeleri Kontrol Et Butonu
-        self.btn_check_update = QPushButton("🚀 Güncellemeleri Kontrol Et")
+        self.btn_check_update = QPushButton("🚀 Güncellemeler")
         self.btn_check_update.setObjectName("secondaryBtn")
         self.btn_check_update.setToolTip("GitHub üzerinden yeni sürüm kontrolü yap")
         self.btn_check_update.clicked.connect(self._manual_check_for_updates)
         layout.addWidget(self.btn_check_update)
+
+        # Dropbox Ayarları Butonu
+        self.btn_settings = QPushButton("⚙️")
+        self.btn_settings.setObjectName("secondaryBtn")
+        self.btn_settings.setToolTip("Dropbox API anahtarlarını ve senkronizasyon ayarlarını yapılandır")
+        self.btn_settings.clicked.connect(self._open_dropbox_settings_dialog)
+        layout.addWidget(self.btn_settings)
 
         return frame
 
@@ -418,10 +464,12 @@ class FaturaTakipApp(QMainWindow):
         self.date_from.setMinimumDate(QDate(1900, 1, 1))
         self.date_from.setSpecialValueText(" ")
         self.date_from.setDate(QDate(start_dt.year, start_dt.month, start_dt.day))
-        self.date_from.setMaximumWidth(105)
+        self.date_from.setMinimumWidth(125)
+        self.date_from.setMaximumWidth(170)
+        self.date_from.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         if self.date_from.calendarWidget():
             self.date_from.calendarWidget().setGridVisible(True)
-        filter_layout.addWidget(self.date_from)
+        filter_layout.addWidget(self.date_from, 1)
 
         lbl_to = QLabel("Bitiş:")
         lbl_to.setStyleSheet("font-weight: 600; color: #94A3B8; font-size: 11px;")
@@ -433,10 +481,12 @@ class FaturaTakipApp(QMainWindow):
         self.date_to.setMinimumDate(QDate(1900, 1, 1))
         self.date_to.setSpecialValueText(" ")
         self.date_to.setDate(QDate(today_dt.year, today_dt.month, today_dt.day))
-        self.date_to.setMaximumWidth(105)
+        self.date_to.setMinimumWidth(125)
+        self.date_to.setMaximumWidth(170)
+        self.date_to.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         if self.date_to.calendarWidget():
             self.date_to.calendarWidget().setGridVisible(True)
-        filter_layout.addWidget(self.date_to)
+        filter_layout.addWidget(self.date_to, 1)
 
         # Filtrele ve Tümünü Göster Butonları
         self.btn_filter_paid = QPushButton("🔍 Filtrele")
@@ -1861,17 +1911,26 @@ class FaturaTakipApp(QMainWindow):
         if not invoice:
             return
 
-        dialog = OdemeGirisDialog(invoice, self)
+        is_cash = (
+            invoice.get("is_cash", False)
+            or str(invoice.get("invoice_number", "")).strip().lower() == "nakit"
+            or str(inv_id).strip().upper().startswith("NAKIT_")
+        )
+        if is_cash:
+            dialog = NakitDuzenleDialog(invoice, db=self.db, parent=self)
+        else:
+            dialog = OdemeGirisDialog(invoice, self)
+
         if dialog.exec():
             if getattr(dialog, "delete_requested", False):
                 self._delete_and_archive_invoice(invoice)
                 return
             res = dialog.get_result()
             self._handle_invoice_updated(inv_id, invoice, res)
-            self.status_bar.showMessage(f"{invoice.get('invoice_number')} fatura durumu güncellendi.", 4000)
+            self.status_bar.showMessage(f"{invoice.get('invoice_number')} güncellendi.", 4000)
 
     def _on_due_cell_double_clicked(self, row: int, col: int):
-        """Sekme 3 Çift Tıklama: Vadesi gelmiş faturayı ödeme / parçalı ödeme yapma."""
+        """Sekme 3 Çift Tıklama (Nakit Sekmesi): Nakit işlem fiyatını, firmayı, tarihi ve durumunu düzenleme."""
         if col == 0:
             return
         item = self.table_due.item(row, 0) or self.table_due.item(row, 1)
@@ -1882,14 +1941,14 @@ class FaturaTakipApp(QMainWindow):
         if not invoice:
             return
 
-        dialog = OdemeGirisDialog(invoice, self)
+        dialog = NakitDuzenleDialog(invoice, db=self.db, parent=self)
         if dialog.exec():
             if getattr(dialog, "delete_requested", False):
                 self._delete_and_archive_invoice(invoice)
                 return
             res = dialog.get_result()
             self._handle_invoice_updated(inv_id, invoice, res)
-            self.status_bar.showMessage(f"{invoice.get('invoice_number')} faturası güncellendi.", 4000)
+            self.status_bar.showMessage(f"Nakit işlemi ({res.get('company_name', 'Nakit')}) güncellendi.", 4000)
 
     def _on_unpaid_cell_double_clicked(self, row: int, col: int):
         """Sekme 4 Çift Tıklama: Ödenmemiş faturayı ödeme / parçalı ödeme / detay düzenleme."""
@@ -1903,7 +1962,16 @@ class FaturaTakipApp(QMainWindow):
         if not invoice:
             return
 
-        dialog = OdemeGirisDialog(invoice, self)
+        is_cash = (
+            invoice.get("is_cash", False)
+            or str(invoice.get("invoice_number", "")).strip().lower() == "nakit"
+            or str(inv_id).strip().upper().startswith("NAKIT_")
+        )
+        if is_cash:
+            dialog = NakitDuzenleDialog(invoice, db=self.db, parent=self)
+        else:
+            dialog = OdemeGirisDialog(invoice, self)
+
         if dialog.exec():
             if getattr(dialog, "delete_requested", False):
                 self._delete_and_archive_invoice(invoice)
@@ -1924,7 +1992,16 @@ class FaturaTakipApp(QMainWindow):
         if not invoice:
             return
 
-        dialog = OdemeGirisDialog(invoice, self)
+        is_cash = (
+            invoice.get("is_cash", False)
+            or str(invoice.get("invoice_number", "")).strip().lower() == "nakit"
+            or str(inv_id).strip().upper().startswith("NAKIT_")
+        )
+        if is_cash:
+            dialog = NakitDuzenleDialog(invoice, db=self.db, parent=self)
+        else:
+            dialog = OdemeGirisDialog(invoice, self)
+
         if dialog.exec():
             if getattr(dialog, "delete_requested", False):
                 self._delete_and_archive_invoice(invoice)
@@ -2133,6 +2210,20 @@ class FaturaTakipApp(QMainWindow):
         """Kullanıcı 'Güncellemeleri Kontrol Et' butonuna bastığında çalışan tetikleyici."""
         self.updater.check_for_updates(silent_if_latest=False)
 
+    def _open_dropbox_settings_dialog(self):
+        """Dropbox Ayarları penceresini açar."""
+        dlg = DropboxAyarlariDialog(
+            on_saved_callback=self._on_dropbox_credentials_saved,
+            base_dir=self.base_dir,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _on_dropbox_credentials_saved(self, app_key: str, app_secret: str, refresh_token: str):
+        """Yeni Dropbox bilgileri kaydedildiğinde yöneticiyi günceller ve yeniden başlatır."""
+        self.dropbox_sync.reconfigure(app_key, app_secret, refresh_token)
+        self.status_bar.showMessage("✓ Dropbox ayarları kaydedildi ve senkronizasyon servisi yeniden başlatıldı.", 5000)
+
     # --- YARDIMCI BUTON İŞLEVLERİ ---
     def _open_invoices_folder(self):
         watch_path = self.watcher.watch_dir
@@ -2163,13 +2254,20 @@ class FaturaTakipApp(QMainWindow):
 
 
 def main():
+    # Windows Görev Çubuğu ID'si (QApplication oluşturulmadan hemen önce benzersiz AppUserModelID tanımlanmalıdır)
+    if sys.platform == "win32" or sys.platform.startswith("win"):
+        try:
+            myappid = "erkayaktas.faturatakip.app.v1"  # Benzersiz uygulama ID'si
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception as e:
+            print(f"[Taskbar Icon Hatası] {e}")
+
     app = QApplication(sys.argv)
     app.setStyleSheet(MAIN_STYLE_SHEET)
 
     # Görev çubuğu ve uygulama ikonu
-    base_dir = get_app_base_dir()
-    icon_path = os.path.join(base_dir, "icon.ico")
-    if os.path.exists(icon_path):
+    icon_path = get_icon_path()
+    if icon_path:
         app.setWindowIcon(QIcon(icon_path))
 
     # Font ayarı
