@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -28,6 +30,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install PyQt6 customtkinter PyMuPDF pdfplumber holidays watchdog pyinstaller dropbox requests
+
+      - name: Sürüm Numarasını Güncelle
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION=$(git describe --tags --always --abbrev=0 2>/dev/null || echo "v1.0.0")-build.${GITHUB_RUN_NUMBER}
+          fi
+          echo "APP_VERSION = \"${VERSION}\"" > src/version.py
 
       - name: Build EXE with PyInstaller
         run: |

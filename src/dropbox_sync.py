@@ -90,6 +90,7 @@ def save_dropbox_config(app_key: str, app_secret: str, refresh_token: str, base_
 REMOTE_INFOS_PATH = "/FaturaTakip/infos.json"
 REMOTE_EXPENSES_PATH = "/FaturaTakip/expenses.json"
 REMOTE_SESSIONS_PATH = "/FaturaTakip/sessions.json"
+REMOTE_PDFS_DIR = "/FaturaTakip/PDFs"
 AUTO_SYNC_INTERVAL_SECONDS = 30
 SESSION_TIMEOUT_SECONDS = 90  # 90 saniyeden uzun süre heartbeat vermeyen kapanmış/çökmüş oturumlar elenir
 
@@ -145,6 +146,7 @@ class DropboxSyncManager(QObject):
         self.remote_path = REMOTE_INFOS_PATH
         self.remote_expenses_path = REMOTE_EXPENSES_PATH
         self.remote_sessions_path = REMOTE_SESSIONS_PATH
+        self.remote_pdfs_dir = REMOTE_PDFS_DIR
         self.local_expenses_path = os.path.join(self.storage_dir, "expenses.json")
 
         # Benzersiz Oturum Tanımlayıcısı
@@ -374,6 +376,83 @@ class DropboxSyncManager(QObject):
         except Exception as e:
             logger.warning(f"[Dropbox Yükleme Başarısız] {e}")
             self.sync_status_updated.emit("⚠️ Dropbox: Yükleme Hatası", "#EF4444")
+
+    # --- PDF YEDEKLEME VE İNDİRME METODLARI ---
+    def upload_pdf(self, local_path: str, filename: Optional[str] = None):
+        """
+        Verilen yerel PDF dosyasını arayüzü dondurmadan arka planda (thread içinde)
+        REMOTE_PDFS_DIR altına yükler (WriteMode.overwrite ile).
+        """
+        if not self.is_configured():
+            logger.debug("[Dropbox upload_pdf] Dropbox yapılandırılmamış, yükleme atlandı.")
+            return
+
+        def _worker():
+            try:
+                if not os.path.exists(local_path):
+                    logger.warning(f"[Dropbox upload_pdf] Yerel dosya bulunamadı: {local_path}")
+                    return
+
+                fname = filename or os.path.basename(local_path)
+                fname = os.path.basename(fname)
+                if not fname:
+                    return
+
+                remote_pdf_path = f"{REMOTE_PDFS_DIR}/{fname}"
+                dbx = self.get_client()
+
+                with open(local_path, "rb") as f:
+                    file_bytes = f.read()
+
+                dbx.files_upload(
+                    file_bytes,
+                    remote_pdf_path,
+                    mode=dropbox.files.WriteMode.overwrite
+                )
+                logger.info(f"[Dropbox upload_pdf] PDF başarıyla yüklendi: {fname} -> {remote_pdf_path}")
+            except Exception as e:
+                logger.warning(f"[Dropbox upload_pdf] PDF yükleme hatası ({local_path}): {e}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def download_pdf(self, filename: str, target_path: str) -> bool:
+        """
+        Dropbox üzerindeki REMOTE_PDFS_DIR altından belirtilen PDF dosyasını target_path yoluna indirir.
+        dbx.files_download_to_file(target_path, f"{REMOTE_PDFS_DIR}/{filename}") kullanır.
+        Başarılıysa True, dosya Dropbox'ta yoksa veya hata oluşursa False döndürür.
+        """
+        if not self.is_configured():
+            logger.warning("[Dropbox download_pdf] Dropbox yapılandırılmamış.")
+            return False
+
+        try:
+            fname = os.path.basename(filename)
+            if not fname:
+                return False
+
+            target_dir = os.path.dirname(os.path.abspath(target_path))
+            if target_dir:
+                os.makedirs(target_dir, exist_ok=True)
+
+            remote_pdf_path = f"{REMOTE_PDFS_DIR}/{fname}"
+            dbx = self.get_client()
+            dbx.files_download_to_file(target_path, remote_pdf_path)
+            logger.info(f"[Dropbox download_pdf] PDF başarıyla indirildi: {remote_pdf_path} -> {target_path}")
+            return True
+        except ApiError as ae:
+            if ae.error.is_path() and ae.error.get_path().is_not_found():
+                logger.warning(f"[Dropbox download_pdf] PDF bulutta bulunamadı: {REMOTE_PDFS_DIR}/{fname}")
+            else:
+                logger.error(f"[Dropbox download_pdf] Dropbox ApiError: {ae}")
+            return False
+        except Exception as e:
+            if os.path.exists(target_path) and os.path.getsize(target_path) == 0:
+                try:
+                    os.remove(target_path)
+                except Exception:
+                    pass
+            logger.error(f"[Dropbox download_pdf] PDF indirme hatası ({filename}): {e}")
+            return False
 
     # --- 3. AUTO-SYNC & CANLI GERİYE SAYIM DÖNGÜSÜ ---
     def _auto_sync_loop(self):

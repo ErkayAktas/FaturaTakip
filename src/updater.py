@@ -24,8 +24,9 @@ from src.database import get_app_base_dir
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.0.5"
-CURRENT_VERSION = f"v{APP_VERSION}"
+from src.version import APP_VERSION
+
+CURRENT_VERSION = APP_VERSION if APP_VERSION.startswith("v") else f"v{APP_VERSION}"
 
 
 def get_github_token() -> str:
@@ -429,7 +430,7 @@ class AutoUpdater:
         question_text = "Yeni bir sürüm bulundu, şimdi güncellensin mi?"
         details = []
         if latest_version:
-            details.append(f"Yeni Sürüm: {latest_version} (Mevcut: v{APP_VERSION})")
+            details.append(f"Yeni Sürüm: {latest_version} (Mevcut: {CURRENT_VERSION})")
         if body:
             details.append(f"Yenilikler:\n{body}")
 

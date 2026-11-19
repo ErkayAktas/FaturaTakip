@@ -1,11 +1,14 @@
 # Sürüm Kontrol Sistemi (Version Checking)
-APP_VERSION = "1.0.5"
+from src.version import APP_VERSION
+
+VERSION_STR = APP_VERSION if str(APP_VERSION).startswith("v") else f"v{APP_VERSION}"
 
 import ctypes
 import os
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -51,7 +54,7 @@ from src.file_watcher import WatcherService
 from src.holiday_service import holiday_service
 from src.pdf_extractor import pdf_extractor
 from src.styles import COLORS, MAIN_STYLE_SHEET
-from src.updater import APP_VERSION, CURRENT_VERSION, AutoUpdater
+from src.updater import CURRENT_VERSION, AutoUpdater
 
 # Windows Görev Çubuğu (Taskbar) Simgesi: AppUserModelID tanımlanmalıdır
 if sys.platform == "win32" or sys.platform.startswith("win"):
@@ -100,7 +103,7 @@ class FaturaTakipApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"Fatura Takip Sistemi | Lojistik & Taşıma Faturaları (v{APP_VERSION})")
+        self.setWindowTitle(f"Fatura Takip Sistemi | Lojistik & Taşıma Faturaları ({VERSION_STR})")
         self.resize(1260, 800)
         self.setMinimumSize(980, 600)
 
@@ -331,7 +334,7 @@ class FaturaTakipApp(QMainWindow):
         # Uygulama Başlığı ve İkon Metni
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
-        app_title = QLabel(f"📄 FATURA TAKİP SİSTEMİ <span style='font-size: 11px; font-weight: normal; color: #94A3B8;'>v{APP_VERSION}</span>")
+        app_title = QLabel(f"📄 FATURA TAKİP SİSTEMİ <span style='font-size: 11px; font-weight: normal; color: #94A3B8;'>{VERSION_STR}</span>")
         app_title.setStyleSheet("font-size: 16px; font-weight: 800; color: #FFFFFF; letter-spacing: 0.5px;")
 
         status_row = QHBoxLayout()
@@ -554,6 +557,7 @@ class FaturaTakipApp(QMainWindow):
 
         self.btn_toggle_summary = QPushButton("▲ Paneli Gizle")
         self.btn_toggle_summary.setObjectName("summaryToggleBtn")
+        self.btn_toggle_summary.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_toggle_summary.setStyleSheet(
             "QPushButton#summaryToggleBtn { background-color: #0F172A; color: #38BDF8; font-size: 11px; font-weight: bold; "
             "border: 1px solid #0284C7; border-radius: 4px; padding: 3px 10px; }"
@@ -563,7 +567,15 @@ class FaturaTakipApp(QMainWindow):
         self.btn_toggle_summary.clicked.connect(self._toggle_summary_panel)
         toggle_bar_layout.addWidget(self.btn_toggle_summary)
 
-        self.summary_toggle_bar.mousePressEvent = lambda e: self._toggle_summary_panel()
+        # Üst başlık satırı tıklama olayı (Çift tetiklenmeyi önlemek için buton alanını hariç tutar)
+        def _on_summary_bar_mouse_press(event):
+            if event.button() == Qt.MouseButton.LeftButton:
+                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                if self.btn_toggle_summary.geometry().contains(pos):
+                    return
+                self._toggle_summary_panel()
+
+        self.summary_toggle_bar.mousePressEvent = _on_summary_bar_mouse_press
         main_layout.addWidget(self.summary_toggle_bar)
 
         # 2. BÜTÜNLEŞİK ÖZET GÖVDESİ (summary_container)
@@ -575,6 +587,7 @@ class FaturaTakipApp(QMainWindow):
         # 2a. ÜST SATIR: DURUM ÖZETLERİ (DÜZENLENECEK, AKTİF / BEKLEYEN, VADESİ GELMİŞ / GEÇMİŞ)
         self.frame_status_cards = QFrame()
         self.frame_status_cards.setObjectName("frameStatusCards")
+        self.frame_status_cards.setCursor(Qt.CursorShape.ArrowCursor)
         status_cards_layout = QHBoxLayout(self.frame_status_cards)
         status_cards_layout.setContentsMargins(0, 0, 0, 0)
         status_cards_layout.setSpacing(8)
@@ -582,6 +595,8 @@ class FaturaTakipApp(QMainWindow):
         self.card_pending = StatCard("DÜZENLENECEK (EKSİK VADE)", "0", "#F97316")
         self.card_all_active = StatCard("AKTİF / BEKLEYEN", "0", "#60A5FA")
         self.card_due_urgent = StatCard("VADESİ GELMİŞ / GEÇMİŞ", "0", "#EF4444")
+        for card in (self.card_pending, self.card_all_active, self.card_due_urgent):
+            card.setCursor(Qt.CursorShape.ArrowCursor)
 
         status_cards_layout.addWidget(self.card_pending)
         status_cards_layout.addWidget(self.card_all_active)
@@ -591,8 +606,7 @@ class FaturaTakipApp(QMainWindow):
         # 2b. ALT SATIR: FİLTRELENEN TOPLAM ALANI (Dinamik Hesap Özeti)
         self.frame_filtered = QFrame()
         self.frame_filtered.setObjectName("summaryFrameFiltered")
-        self.frame_filtered.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.frame_filtered.mousePressEvent = lambda e: self._toggle_summary_panel()
+        self.frame_filtered.setCursor(Qt.CursorShape.ArrowCursor)
         fil_vbox = QVBoxLayout(self.frame_filtered)
         fil_vbox.setContentsMargins(10, 6, 10, 6)
         fil_vbox.setSpacing(4)
@@ -614,6 +628,9 @@ class FaturaTakipApp(QMainWindow):
         self.card_fil_total = StatCard("FİLTRELENEN TOPLAM", "0.00 TL", "#10B981")
         self.card_fil_count = StatCard("FİLTRELENEN ADET", "Toplam Adet: 0", "#38BDF8")
         self.lbl_fil_adet = self.card_fil_count.value_label
+
+        for card in (self.card_fil_tax_excluded, self.card_fil_kdv, self.card_fil_total, self.card_fil_count):
+            card.setCursor(Qt.CursorShape.ArrowCursor)
 
         fil_cards_layout.addWidget(self.card_fil_tax_excluded)
         fil_cards_layout.addWidget(self.card_fil_kdv)
@@ -638,6 +655,11 @@ class FaturaTakipApp(QMainWindow):
 
     def _toggle_summary_panel(self):
         """Üst kısımdaki toplam tutar ve durum özet panelini (Genel, Filtrelenen ve 3 Durum Kutusu) açar veya gizler."""
+        now = time.time()
+        if hasattr(self, "_last_toggle_time") and (now - self._last_toggle_time) < 0.2:
+            return
+        self._last_toggle_time = now
+
         if not hasattr(self, "summary_container"):
             return
         is_hidden = self.summary_container.isHidden()
@@ -698,35 +720,28 @@ class FaturaTakipApp(QMainWindow):
         self.btn_deselect_all.clicked.connect(self._deselect_all_current_tab)
         layout.addWidget(self.btn_deselect_all)
 
+        layout.addSpacing(6)
+
+        # Seçili Fatura Toplamları Alanı (Dinamik Özet)
+        self.lbl_selected_totals = QLabel("Vergisiz: 0.00 TL  |  Vergi (KDV): 0.00 TL  |  Toplam: 0.00 TL")
+        self.lbl_selected_totals.setObjectName("lblSelectedTotals")
+        self.lbl_selected_totals.setStyleSheet(
+            "QLabel#lblSelectedTotals { font-size: 11px; font-weight: bold; color: #CBD5E1; "
+            "background-color: #0F172A; border: 1px solid #334155; border-radius: 6px; padding: 4px 12px; }"
+        )
+        self.lbl_selected_totals.setToolTip("Seçili faturaların anlık Vergisiz, Vergi (KDV) ve Toplam tutarları")
+        layout.addWidget(self.lbl_selected_totals)
+
         layout.addStretch()
 
-        # 3 Toplu İşlem Butonu:
-        # 1. Toplu Ödendi İşaretle
+        # Sağ Taraf: Yalnızca Toplu Ödendi İşaretle Butonu
         self.btn_bulk_mark_paid = QPushButton("✅ Toplu Ödendi İşaretle")
         self.btn_bulk_mark_paid.setObjectName("successBtn")
-        self.btn_bulk_mark_paid.setStyleSheet("padding: 5px 12px; font-size: 11px; font-weight: bold;")
+        self.btn_bulk_mark_paid.setStyleSheet("padding: 5px 14px; font-size: 11px; font-weight: bold;")
         self.btn_bulk_mark_paid.setToolTip("İşaretli tüm faturaları tek seferde 'Ödendi' olarak kaydet")
         self.btn_bulk_mark_paid.setEnabled(False)
         self.btn_bulk_mark_paid.clicked.connect(self._handle_bulk_mark_paid)
         layout.addWidget(self.btn_bulk_mark_paid)
-
-        # 2. Toplu Vade Değiştir
-        self.btn_bulk_due_date = QPushButton("📅 Toplu Vade Değiştir")
-        self.btn_bulk_due_date.setObjectName("primaryBtn")
-        self.btn_bulk_due_date.setStyleSheet("padding: 5px 12px; font-size: 11px; font-weight: bold; background-color: #0284C7; color: #FFFFFF; border-radius: 6px;")
-        self.btn_bulk_due_date.setToolTip("İşaretli faturalar için tek bir tarih seçici ile vadesini güncelle")
-        self.btn_bulk_due_date.setEnabled(False)
-        self.btn_bulk_due_date.clicked.connect(self._handle_bulk_due_date)
-        layout.addWidget(self.btn_bulk_due_date)
-
-        # 3. Toplu Sil
-        self.btn_bulk_delete = QPushButton("🗑️ Toplu Sil")
-        self.btn_bulk_delete.setObjectName("dangerBtn")
-        self.btn_bulk_delete.setStyleSheet("padding: 5px 12px; font-size: 11px; font-weight: bold;")
-        self.btn_bulk_delete.setToolTip("İşaretli faturaların tamamını silip PDF dosyalarını Silinenler klasörüne taşı")
-        self.btn_bulk_delete.setEnabled(False)
-        self.btn_bulk_delete.clicked.connect(self._handle_bulk_delete)
-        layout.addWidget(self.btn_bulk_delete)
 
         return bar
 
@@ -767,18 +782,57 @@ class FaturaTakipApp(QMainWindow):
             self._update_bulk_actions_state()
 
     def _update_bulk_actions_state(self):
-        """Aktif sekmede işaretlenmiş fatura sayısına göre buton durumlarını ayarlar."""
+        """Aktif sekmede işaretlenmiş fatura sayısına ve toplam tutarlarına göre buton ve özet alanını günceller."""
         table = self._get_active_table()
-        checked_ids = table.get_checked_invoice_ids() if table else []
-        count = len(checked_ids)
+        checked_rows = table.get_checked_rows() if table else []
+        count = len(checked_rows)
+
         if hasattr(self, "lbl_selected_count"):
             self.lbl_selected_count.setText(f"({count} fatura seçildi)")
+
+        # Seçili faturaların anlık toplam tutarları (Vergisiz, Vergi (KDV), Toplam)
+        sum_tax_ex = 0.0
+        sum_kdv = 0.0
+        sum_total = 0.0
+
+        if table and count > 0:
+            for r in checked_rows:
+                item_tax = table.item(r, 4)
+                item_kdv = table.item(r, 5)
+                item_tot = table.item(r, 6)
+
+                row_tax = getattr(item_tax, "numeric_value", None) if item_tax else None
+                row_kdv = getattr(item_kdv, "numeric_value", None) if item_kdv else None
+                row_tot = getattr(item_tot, "numeric_value", None) if item_tot else None
+
+                # Hücrede numeric_value yoksa veritabanından yedek kontrolü yap
+                if row_tax is None or row_kdv is None or row_tot is None:
+                    item_0 = table.item(r, 0)
+                    inv_id = item_0.data(Qt.ItemDataRole.UserRole) if item_0 else None
+                    inv = self.db.get_invoice(str(inv_id)) if inv_id else None
+                    if inv:
+                        if row_tax is None:
+                            row_tax = float(inv.get("tax_excluded_amount") or 0.0)
+                        if row_kdv is None:
+                            row_kdv = float(inv.get("kdv_amount") or 0.0)
+                        if row_tot is None:
+                            row_tot = float(inv.get("total_amount") if inv.get("total_amount") is not None else (row_tax + row_kdv))
+
+                sum_tax_ex += float(row_tax or 0.0)
+                sum_kdv += float(row_kdv or 0.0)
+                sum_total += float(row_tot or 0.0)
+
+        self.selected_tax_excluded_total = sum_tax_ex
+        self.selected_kdv_total = sum_kdv
+        self.selected_grand_total = sum_total
+
+        if hasattr(self, "lbl_selected_totals"):
+            self.lbl_selected_totals.setText(
+                f"Vergisiz: {sum_tax_ex:,.2f} TL  |  Vergi (KDV): {sum_kdv:,.2f} TL  |  Toplam: {sum_total:,.2f} TL"
+            )
+
         if hasattr(self, "btn_bulk_mark_paid"):
             self.btn_bulk_mark_paid.setEnabled(count > 0)
-        if hasattr(self, "btn_bulk_due_date"):
-            self.btn_bulk_due_date.setEnabled(count > 0)
-        if hasattr(self, "btn_bulk_delete"):
-            self.btn_bulk_delete.setEnabled(count > 0)
 
     def _handle_bulk_delete(self):
         """Seçilen onay kutuları üzerinden: Toplu Silme."""
@@ -1123,6 +1177,13 @@ class FaturaTakipApp(QMainWindow):
         inv_no = inv_data.get("invoice_number", "")
         company = inv_data.get("company_name", "")
         self.status_bar.showMessage(f"Yeni fatura kaydedildi: {inv_no} - {company}", 5000)
+
+        # Otomatik PDF Yükleme: Sisteme yeni bir fatura PDF'si eklendiğinde Dropbox'a yedekle
+        if hasattr(self, "dropbox_sync") and self.dropbox_sync and self.dropbox_sync.is_configured():
+            f_path = inv_data.get("file_path")
+            f_name = inv_data.get("file_name") or (os.path.basename(f_path) if f_path else None)
+            if f_path and os.path.exists(f_path):
+                self.dropbox_sync.upload_pdf(f_path, f_name)
 
     @pyqtSlot(str, str)
     def _on_duplicate_skipped(self, inv_no: str, file_name: str):
@@ -1919,7 +1980,7 @@ class FaturaTakipApp(QMainWindow):
         if is_cash:
             dialog = NakitDuzenleDialog(invoice, db=self.db, parent=self)
         else:
-            dialog = OdemeGirisDialog(invoice, self)
+            dialog = OdemeGirisDialog(invoice, self, dropbox_sync=self.dropbox_sync)
 
         if dialog.exec():
             if getattr(dialog, "delete_requested", False):
@@ -1970,7 +2031,7 @@ class FaturaTakipApp(QMainWindow):
         if is_cash:
             dialog = NakitDuzenleDialog(invoice, db=self.db, parent=self)
         else:
-            dialog = OdemeGirisDialog(invoice, self)
+            dialog = OdemeGirisDialog(invoice, self, dropbox_sync=self.dropbox_sync)
 
         if dialog.exec():
             if getattr(dialog, "delete_requested", False):
@@ -2000,7 +2061,7 @@ class FaturaTakipApp(QMainWindow):
         if is_cash:
             dialog = NakitDuzenleDialog(invoice, db=self.db, parent=self)
         else:
-            dialog = OdemeGirisDialog(invoice, self)
+            dialog = OdemeGirisDialog(invoice, self, dropbox_sync=self.dropbox_sync)
 
         if dialog.exec():
             if getattr(dialog, "delete_requested", False):
@@ -2033,6 +2094,7 @@ class FaturaTakipApp(QMainWindow):
     # --- ARAMA VE ÇOK KRİTERLİ FİLTRELEME (SEARCH, CASH & DATE FILTERS) ---
     def _on_search_text_changed(self, text: str):
         self._apply_all_filters()
+        self._update_bulk_actions_state()
 
     def _on_tab_changed(self, index: int):
         self._apply_all_filters()
@@ -2239,6 +2301,16 @@ class FaturaTakipApp(QMainWindow):
 
     def _scan_folder_now(self):
         added, total = self.watcher.scan_existing_files()
+
+        # Otomatik PDF Yükleme: Klasör tarandığında mevcut PDF'leri Dropbox'a yedekle
+        if hasattr(self, "dropbox_sync") and self.dropbox_sync and self.dropbox_sync.is_configured():
+            watch_path = getattr(self.watcher, "watch_dir", None)
+            if watch_path and os.path.exists(watch_path):
+                for f in os.listdir(watch_path):
+                    if f.lower().endswith(".pdf") and not f.startswith("."):
+                        full_p = os.path.join(watch_path, f)
+                        self.dropbox_sync.upload_pdf(full_p, f)
+
         QMessageBox.information(
             self,
             "Klasör Taraması",

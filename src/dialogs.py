@@ -1,8 +1,11 @@
 import calendar
 from datetime import date, datetime, timedelta
+import logging
+import os
+import tempfile
 from typing import Any, Dict, List, Optional
-from PyQt6.QtCore import QDate, QRectF, Qt
-from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PyQt6.QtCore import QDate, QRectF, Qt, QUrl
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -14,6 +17,7 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -26,6 +30,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -36,6 +41,8 @@ from PyQt6.QtWidgets import (
 from src.database import ExpenseDatabase, parse_date_obj
 from src.holiday_service import holiday_service
 from src.styles import COLORS
+
+logger = logging.getLogger(__name__)
 
 
 class BaseResponsiveDialog(QDialog):
@@ -321,14 +328,38 @@ class OdemeGirisDialog(BaseResponsiveDialog):
     - Gizli İletişim Bilgileri (İsim & Telefon) görüntülenir ve düzenlenebilir.
     """
 
-    def __init__(self, invoice: Dict[str, Any], parent=None):
+    def __init__(
+        self,
+        invoice: Dict[str, Any],
+        parent=None,
+        dropbox_sync=None,
+        base_dir: Optional[str] = None,
+        watch_dir: Optional[str] = None,
+    ):
         super().__init__(parent)
         self.invoice = invoice
         self.delete_requested = False
 
+        # Dropbox senkronizasyon yöneticisi ve çalışma dizinleri
+        self.dropbox_sync = dropbox_sync or getattr(parent, "dropbox_sync", None)
+        self.base_dir = base_dir or getattr(parent, "base_dir", None)
+        if not self.base_dir:
+            try:
+                from src.database import get_app_base_dir
+                self.base_dir = get_app_base_dir()
+            except Exception:
+                self.base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+        self.watch_dir = watch_dir
+        if not self.watch_dir:
+            if parent and hasattr(parent, "watcher") and hasattr(parent.watcher, "watch_dir"):
+                self.watch_dir = parent.watcher.watch_dir
+            else:
+                self.watch_dir = os.path.join(self.base_dir, "TasımaBelgeler", "TasımaFaturaları")
+
         inv_title = invoice.get("invoice_number") or invoice.get("id") or "Fatura"
         self.setWindowTitle(f"Fatura Detayı ve Ödeme Durumu - {inv_title}")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(540)
         self.setup_ui()
 
     def setup_ui(self):
@@ -565,6 +596,25 @@ class OdemeGirisDialog(BaseResponsiveDialog):
         self.delete_btn.setObjectName("dangerBtn")
         self.delete_btn.clicked.connect(self._on_delete_clicked)
 
+        self.btn_open_pdf = QPushButton("📄 PDF Aç")
+        self.btn_open_pdf.setStyleSheet(
+            "QPushButton { background-color: #0284C7; color: white; font-weight: bold; padding: 6px 14px; border-radius: 6px; } "
+            "QPushButton:hover { background-color: #0369A1; } "
+            "QPushButton:disabled { background-color: #475569; color: #94A3B8; }"
+        )
+        self.btn_open_pdf.setToolTip("Faturanın PDF dosyasını aç (Yerelde yoksa Dropbox'tan indirilir)")
+        self.btn_open_pdf.clicked.connect(self._on_open_pdf_clicked)
+
+        # Manuel nakit girişlerinde veya kayıtlı bir PDF dosya adı bulunmayan kayıtlarda butonu gizle
+        file_name = str(self.invoice.get("file_name") or "").strip()
+        is_cash = (
+            bool(self.invoice.get("is_cash"))
+            or str(self.invoice.get("invoice_number", "")).strip().lower() == "nakit"
+            or str(self.invoice.get("id", "")).strip().upper().startswith("NAKIT_")
+        )
+        if is_cash or not file_name:
+            self.btn_open_pdf.setVisible(False)
+
         self.cancel_btn = QPushButton("İptal")
         self.cancel_btn.setObjectName("secondaryBtn")
         self.cancel_btn.clicked.connect(self.reject)
@@ -574,6 +624,7 @@ class OdemeGirisDialog(BaseResponsiveDialog):
         self.save_btn.clicked.connect(self.accept)
 
         btn_layout.addWidget(self.delete_btn)
+        btn_layout.addWidget(self.btn_open_pdf)
         btn_layout.addStretch()
         btn_layout.addWidget(self.cancel_btn)
         btn_layout.addWidget(self.save_btn)
@@ -595,6 +646,85 @@ class OdemeGirisDialog(BaseResponsiveDialog):
         if reply == QMessageBox.StandardButton.Yes:
             self.delete_requested = True
             self.accept()
+
+    def _on_open_pdf_clicked(self):
+        """
+        Yerel ve Bulut (Fallback) Açma Mantığı:
+        1. Faturanın dosya adını kullanarak yerel fatura klasöründe os.path.exists(local_path) kontrolü yap.
+        2. Dosya yerelde varsa, PyQt6.QtGui.QDesktopServices.openUrl(QUrl.fromLocalFile(local_path)) ile doğrudan aç.
+        3. Dosya yerelde yoksa, kullanıcıya indirme yapıldığını belirten bir durum mesajı göster ve
+           tempfile.gettempdir() içine download_pdf(filename, temp_path) ile indir.
+           İndirme başarılıysa QDesktopServices.openUrl(QUrl.fromLocalFile(temp_path)) ile aç.
+        4. Dosya hem yerel dizinde hem de Dropbox'ta bulunamazsa QMessageBox.warning ile
+           'PDF dosyası yerel dizinde ve Dropbox'ta bulunamadı.' uyarısı göster.
+        """
+        file_name = str(self.invoice.get("file_name") or "").strip()
+        if not file_name:
+            QMessageBox.warning(self, "Uyarı", "PDF dosyası yerel dizinde ve Dropbox'ta bulunamadı.")
+            return
+
+        # 1. Yerel dosya kontrolü
+        local_path = None
+        candidate_watch = os.path.join(self.watch_dir, file_name)
+        if os.path.exists(candidate_watch):
+            local_path = candidate_watch
+        else:
+            raw_path = self.invoice.get("file_path")
+            if raw_path and os.path.exists(raw_path):
+                local_path = raw_path
+            else:
+                candidate_base = os.path.join(self.base_dir, file_name)
+                if os.path.exists(candidate_base):
+                    local_path = candidate_base
+
+        # 2. Dosya yerelde varsa QDesktopServices ile doğrudan aç
+        if local_path and os.path.exists(local_path):
+            abs_local = os.path.abspath(local_path)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(abs_local))
+            return
+
+        # 3. Dosya yerelde yoksa: Dropbox'tan indirme (Fallback)
+        if not self.dropbox_sync or not self.dropbox_sync.is_configured():
+            QMessageBox.warning(
+                self,
+                "Uyarı",
+                "PDF dosyası yerel dizinde ve Dropbox'ta bulunamadı."
+            )
+            return
+
+        # Kullanıcıya indirme yapıldığını belirten durum mesajı göster ve tempfile içine indir
+        temp_dir = tempfile.gettempdir()
+        temp_pdf_path = os.path.join(temp_dir, file_name)
+
+        old_text = self.btn_open_pdf.text()
+        self.btn_open_pdf.setEnabled(False)
+        self.btn_open_pdf.setText("⏳ PDF İndiriliyor...")
+        if self.parent() and hasattr(self.parent(), "status_bar"):
+            self.parent().status_bar.showMessage(f"'{file_name}' Dropbox'tan indiriliyor...", 5000)
+        QApplication.processEvents()
+
+        try:
+            download_success = self.dropbox_sync.download_pdf(file_name, temp_pdf_path)
+            if download_success and os.path.exists(temp_pdf_path):
+                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(temp_pdf_path)))
+                if self.parent() and hasattr(self.parent(), "status_bar"):
+                    self.parent().status_bar.showMessage(f"'{file_name}' başarıyla açıldı.", 4000)
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Uyarı",
+                    "PDF dosyası yerel dizinde ve Dropbox'ta bulunamadı."
+                )
+        except Exception as e:
+            logger.error(f"[PDF Açma Hatası] {e}")
+            QMessageBox.warning(
+                self,
+                "Uyarı",
+                "PDF dosyası yerel dizinde ve Dropbox'ta bulunamadı."
+            )
+        finally:
+            self.btn_open_pdf.setEnabled(True)
+            self.btn_open_pdf.setText(old_text)
 
     def _on_status_radio_changed(self):
         if self.radio_unpaid.isChecked():
@@ -1786,23 +1916,28 @@ class GiderYonetimiWidget(QWidget):
 
     def _setup_ui(self):
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(16, 16, 16, 14)
-        root_layout.setSpacing(10)
+        root_layout.setContentsMargins(14, 8, 14, 10)
+        root_layout.setSpacing(6)
 
-        # Üst Başlık ve Bilgi Çubuğu
+        # Üst Başlık ve Bilgi Çubuğu (Kompakt Yükseklik ve Sabit Boyutlandırma)
         header_frame = QFrame()
+        header_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        header_frame.setMaximumHeight(52)
         header_frame.setStyleSheet(
-            f"background-color: {COLORS['bg_card']}; border: 1px solid {COLORS['border']}; border-radius: 8px; padding: 10px 14px;"
+            f"QFrame {{ background-color: {COLORS['bg_card']}; border: 1px solid {COLORS['border']}; border-radius: 8px; }}"
+            f"QFrame QLabel {{ border: none; background: transparent; }}"
         )
         header_layout = QHBoxLayout(header_frame)
-        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setContentsMargins(12, 6, 12, 6)
+        header_layout.setSpacing(0)
 
         title_vbox = QVBoxLayout()
-        title_vbox.setSpacing(3)
+        title_vbox.setContentsMargins(0, 0, 0, 0)
+        title_vbox.setSpacing(2)
         lbl_title = QLabel("📊 GİDER YÖNETİMİ & GELİR - GİDER ANALİZİ")
-        lbl_title.setStyleSheet("font-size: 16px; font-weight: 800; color: #FFFFFF; letter-spacing: 0.5px;")
+        lbl_title.setStyleSheet("font-size: 14px; font-weight: 800; color: #FFFFFF; letter-spacing: 0.5px; border: none; background: transparent;")
         lbl_sub = QLabel("Gider türlerini yönetin, yeni harcama kaydedin ve finansal net durumunuzu anlık izleyin.")
-        lbl_sub.setStyleSheet("font-size: 11px; color: #94A3B8;")
+        lbl_sub.setStyleSheet("font-size: 11px; color: #94A3B8; border: none; background: transparent;")
         title_vbox.addWidget(lbl_title)
         title_vbox.addWidget(lbl_sub)
         header_layout.addLayout(title_vbox)
@@ -2033,75 +2168,129 @@ class GiderYonetimiWidget(QWidget):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(12)
 
-        # Form Kartı
+        # Form Kartı: 2 Satırlı Kompakt Yatay QGridLayout
         form_card = QFrame()
+        form_card.setObjectName("expenseFormCard")
+        form_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         form_card.setStyleSheet(
-            "background-color: #0F172A; border: 1px solid #334155; border-radius: 8px; padding: 12px 16px;"
+            "QFrame#expenseFormCard { background-color: #0F172A; border: 1px solid #334155; border-radius: 8px; padding: 12px 14px; } "
+            "QFrame#expenseFormCard QLabel { border: none; background: transparent; font-size: 11px; font-weight: bold; color: #E2E8F0; }"
         )
-        form_layout = QFormLayout(form_card)
-        form_layout.setSpacing(10)
-        form_layout.setContentsMargins(0, 0, 0, 0)
+        grid = QGridLayout(form_card)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(10)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
 
-        # 1. Gider Türü
+        # Ortak Giriş Alanı Stili
+        input_style = (
+            "background-color: #1E293B; color: #FFFFFF; border: 1px solid #475569; "
+            "border-radius: 6px; padding: 4px 10px; font-size: 13px;"
+        )
+
+        # 1. SATIR: 3 Sütun (Gider Türü, Gider Tarihi, Harcama Tutarı)
+        # 1.1 Gider Türü (QComboBox)
+        lbl_cat = QLabel("Gider Türü *:")
+        lbl_cat.setStyleSheet("border: none; background: transparent; font-size: 11px; font-weight: bold; color: #E2E8F0;")
         self.combo_expense_cat = QComboBox()
         self.combo_expense_cat.setView(QListView())
+        self.combo_expense_cat.setFixedHeight(38)
         self.combo_expense_cat.setStyleSheet(
-            "QComboBox { background-color: #1E293B; color: #FFFFFF; border: 1px solid #475569; border-radius: 6px; padding: 6px 12px; font-weight: bold; } "
+            f"QComboBox {{ {input_style} font-weight: bold; }} "
+            "QComboBox:focus { border: 1px solid #0284C7; } "
             "QComboBox QAbstractItemView { background-color: #1E293B; color: #FFFFFF; selection-background-color: #0284C7; }"
         )
-        form_layout.addRow("Gider Türü *:", self.combo_expense_cat)
+        col0_box = QVBoxLayout()
+        col0_box.setSpacing(4)
+        col0_box.addWidget(lbl_cat)
+        col0_box.addWidget(self.combo_expense_cat)
+        grid.addLayout(col0_box, 0, 0)
 
-        # 2. Gider Tarihi
+        # 1.2 Gider Tarihi (QDateEdit)
+        lbl_date = QLabel("Gider Tarihi *:")
+        lbl_date.setStyleSheet("border: none; background: transparent; font-size: 11px; font-weight: bold; color: #E2E8F0;")
         today = datetime.today()
         self.date_expense = QDateEdit()
         self.date_expense.setCalendarPopup(True)
         self.date_expense.setDisplayFormat("dd.MM.yyyy")
         self.date_expense.setDate(QDate(today.year, today.month, today.day))
-        self.date_expense.setStyleSheet("background-color: #1E293B; padding: 6px 10px; border-radius: 6px;")
+        self.date_expense.setFixedHeight(38)
+        self.date_expense.setStyleSheet(
+            f"QDateEdit {{ {input_style} color: #38BDF8; font-weight: bold; }} "
+            "QDateEdit:focus { border: 1px solid #0284C7; }"
+        )
         if self.date_expense.calendarWidget():
             self.date_expense.calendarWidget().setGridVisible(True)
-        form_layout.addRow("Gider Tarihi *:", self.date_expense)
+        col1_box = QVBoxLayout()
+        col1_box.setSpacing(4)
+        col1_box.addWidget(lbl_date)
+        col1_box.addWidget(self.date_expense)
+        grid.addLayout(col1_box, 0, 1)
 
-        # 3. Tutar Girişi
+        # 1.3 Harcama Tutarı (QDoubleSpinBox)
+        lbl_amount = QLabel("Harcama Tutarı *:")
+        lbl_amount.setStyleSheet("border: none; background: transparent; font-size: 11px; font-weight: bold; color: #E2E8F0;")
         self.spin_expense_amount = QDoubleSpinBox()
         self.spin_expense_amount.setRange(0.01, 999999999.00)
         self.spin_expense_amount.setDecimals(2)
         self.spin_expense_amount.setSuffix(" TL")
         self.spin_expense_amount.setValue(0.00)
+        self.spin_expense_amount.setFixedHeight(38)
         self.spin_expense_amount.setStyleSheet(
-            "background-color: #1E293B; color: #F59E0B; font-size: 15px; font-weight: bold; padding: 6px 10px; border-radius: 6px;"
+            f"QDoubleSpinBox {{ {input_style} color: #F59E0B; font-size: 14px; font-weight: bold; }} "
+            "QDoubleSpinBox:focus { border: 1px solid #0284C7; }"
         )
-        form_layout.addRow("Harcama Tutarı *:", self.spin_expense_amount)
+        col2_box = QVBoxLayout()
+        col2_box.setSpacing(4)
+        col2_box.addWidget(lbl_amount)
+        col2_box.addWidget(self.spin_expense_amount)
+        grid.addLayout(col2_box, 0, 2)
 
-        # 4. Açıklama / Belge / Not
+        # 2. SATIR: 2 Sütun (Açıklama / Not ve Gideri Kaydet Butonu)
+        # 2.1 Açıklama / Belge / Not (Genişleyen QLineEdit - Sütun 0 ve 1'i kaplar)
+        lbl_desc = QLabel("Açıklama / Not:")
+        lbl_desc.setStyleSheet("border: none; background: transparent; font-size: 11px; font-weight: bold; color: #E2E8F0;")
         self.input_expense_desc = QLineEdit()
         self.input_expense_desc.setPlaceholderText("Açıklama, fiş/fatura detayı, plaka veya not (isteğe bağlı)...")
-        self.input_expense_desc.setStyleSheet("background-color: #1E293B; padding: 6px 10px; border-radius: 6px;")
+        self.input_expense_desc.setFixedHeight(38)
+        self.input_expense_desc.setStyleSheet(
+            f"QLineEdit {{ {input_style} }} "
+            "QLineEdit:focus { border: 1px solid #0284C7; }"
+        )
         self.input_expense_desc.returnPressed.connect(self._save_expense)
-        form_layout.addRow("Açıklama / Not:", self.input_expense_desc)
+        row2_col0_box = QVBoxLayout()
+        row2_col0_box.setSpacing(4)
+        row2_col0_box.addWidget(lbl_desc)
+        row2_col0_box.addWidget(self.input_expense_desc)
+        grid.addLayout(row2_col0_box, 1, 0, 1, 2)
 
-        # Buton ve Durum Bildirimi
-        save_layout = QHBoxLayout()
+        # 2.2 Gideri Kaydet Butonu (Sütun 2 - Giriş alanlarıyla aynı yükseklikte: 38px)
         self.lbl_save_status = QLabel("")
-        self.lbl_save_status.setStyleSheet("color: #10B981; font-weight: bold; font-size: 11px;")
+        self.lbl_save_status.setStyleSheet("color: #10B981; font-weight: bold; font-size: 11px; border: none; background: transparent;")
 
-        self.btn_save_expense = QPushButton("💾 Gideri Kaydet (Yerel & Dropbox)")
+        self.btn_save_expense = QPushButton("💾 Gideri Kaydet (Yerel + Dropbox)")
         self.btn_save_expense.setObjectName("successBtn")
+        self.btn_save_expense.setFixedHeight(38)
         self.btn_save_expense.setStyleSheet(
-            "background-color: #10B981; color: white; padding: 8px 24px; font-size: 13px; font-weight: bold; border-radius: 6px;"
+            "QPushButton { background-color: #10B981; color: white; padding: 0 16px; font-size: 13px; font-weight: bold; border-radius: 6px; border: none; } "
+            "QPushButton:hover { background-color: #059669; } "
+            "QPushButton:pressed { background-color: #047857; }"
         )
         self.btn_save_expense.clicked.connect(self._save_expense)
 
-        save_layout.addWidget(self.lbl_save_status)
-        save_layout.addStretch()
-        save_layout.addWidget(self.btn_save_expense)
-        form_layout.addRow("", save_layout)
+        row2_col1_box = QVBoxLayout()
+        row2_col1_box.setSpacing(4)
+        row2_col1_box.addWidget(self.lbl_save_status)
+        row2_col1_box.addWidget(self.btn_save_expense)
+        grid.addLayout(row2_col1_box, 1, 2, 1, 1)
 
         layout.addWidget(form_card)
 
-        # Alt Bölüm: Son Eklenen Giderler Tablosu
+        # Alt Bölüm: Son Eklenen Giderler Tablosu (Dikeyde Maksimum Esneme)
         lbl_recent = QLabel("📋 Son Eklenen Gider Kayıtları (En Yeni İlk)")
-        lbl_recent.setStyleSheet("font-size: 12px; font-weight: bold; color: #E2E8F0; margin-top: 4px;")
+        lbl_recent.setStyleSheet("font-size: 12px; font-weight: bold; color: #E2E8F0; margin-top: 4px; border: none; background: transparent;")
         layout.addWidget(lbl_recent)
 
         self.table_recent_expenses = QTableWidget()
@@ -2114,10 +2303,12 @@ class GiderYonetimiWidget(QWidget):
         self.table_recent_expenses.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         self.table_recent_expenses.setColumnWidth(4, 90)
         self.table_recent_expenses.verticalHeader().setVisible(False)
+        self.table_recent_expenses.verticalHeader().setDefaultSectionSize(38)
         self.table_recent_expenses.setAlternatingRowColors(True)
+        self.table_recent_expenses.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.table_recent_expenses.setStyleSheet(
             "QTableWidget { background-color: #0F172A; border: 1px solid #334155; border-radius: 6px; } "
-            "QTableWidget::item { padding: 6px 10px; }"
+            "QTableWidget::item { padding: 4px 8px; }"
         )
         self.table_recent_expenses.cellDoubleClicked.connect(self._on_recent_expense_double_clicked)
         layout.addWidget(self.table_recent_expenses, 1)
@@ -2159,6 +2350,7 @@ class GiderYonetimiWidget(QWidget):
         self.table_recent_expenses.setRowCount(len(expenses))
 
         for row, exp in enumerate(expenses):
+            self.table_recent_expenses.setRowHeight(row, 38)
             exp_id = str(exp.get("id", ""))
 
             # 0: Tarih
@@ -2196,7 +2388,12 @@ class GiderYonetimiWidget(QWidget):
 
             # 4: Sil Butonu
             btn_del = QPushButton("🗑️ Sil")
-            btn_del.setStyleSheet("padding: 3px 8px; font-size: 11px; background-color: #EF4444; color: #FFFFFF;")
+            btn_del.setFixedHeight(28)
+            btn_del.setStyleSheet(
+                "QPushButton { padding: 3px 8px; font-size: 11px; font-weight: bold; "
+                "background-color: #EF4444; color: #FFFFFF; border-radius: 4px; border: none; } "
+                "QPushButton:hover { background-color: #DC2626; }"
+            )
             btn_del.clicked.connect(lambda _, eid=exp_id: self._delete_expense(eid))
             self.table_recent_expenses.setCellWidget(row, 4, btn_del)
 
