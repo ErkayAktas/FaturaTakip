@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 from src.components import DateTableWidgetItem, NumericTableWidgetItem, SortableTableWidget, StatCard
 from src.database import ExpenseDatabase, InvoiceDatabase, get_app_base_dir, sanitize_date_str
 from src.dialogs import (
+    AyarlarDialog,
     DropboxAyarlariDialog,
     GiderYonetimiDialog,
     GiderYonetimiWidget,
@@ -55,6 +56,7 @@ from src.holiday_service import holiday_service
 from src.pdf_extractor import pdf_extractor
 from src.styles import COLORS, MAIN_STYLE_SHEET
 from src.updater import CURRENT_VERSION, AutoUpdater
+from src.version_history import VersionHistoryPage
 
 # Windows Görev Çubuğu (Taskbar) Simgesi: AppUserModelID tanımlanmalıdır
 if sys.platform == "win32" or sys.platform.startswith("win"):
@@ -234,6 +236,23 @@ class FaturaTakipApp(QMainWindow):
         expenses_layout.addWidget(self.expenses_widget, 1)
         self.stack.addWidget(self.page_expenses)
 
+        # -------------------------------------------------------------
+        # 2. İNDEKS (Sayfa 3): "Sürüm Geçmişi & Fark Analizi" Modülü (Tam Boyut)
+        # -------------------------------------------------------------
+        self.page_version_history = QWidget()
+        vh_layout = QVBoxLayout(self.page_version_history)
+        vh_layout.setContentsMargins(0, 0, 0, 0)
+        vh_layout.setSpacing(0)
+
+        self.version_history_page = VersionHistoryPage(
+            db=self.db,
+            expense_db=self.expense_db,
+            dropbox_sync=self.dropbox_sync,
+            parent=self.page_version_history,
+        )
+        vh_layout.addWidget(self.version_history_page, 1)
+        self.stack.addWidget(self.page_version_history)
+
         # Varsayılan olarak Fatura Takip ekranı (0. indeks) aktiftir
         self.stack.setCurrentIndex(0)
 
@@ -277,48 +296,81 @@ class FaturaTakipApp(QMainWindow):
                 else:
                     btn.hide()
 
-    def _toggle_view_mode(self):
-        """
-        Header Butonu ile Dinamik Görünüm Değiştirme:
-        Üst kısımdaki Header'da yer alan 'Gider Yönetimi' butonu tıklandığında:
-        - 0. İndeksteyse (Fatura Takip): Görünüm 1. İndekse (Gider Yönetimi) geçer,
-          buton metni '📄 Fatura Takibine Geç' olarak güncellenir.
-          'Manuel Nakit Girişi', 'Klasörü Aç' ve 'Klasörü Tara' butonları gizlenir (hide()).
-        - 1. İndeksteyse (Gider Yönetimi): Görünüm 0. İndekse (Fatura Takip) geri döner,
-          buton metni '📊 Gider Yönetimi' eski haline döner.
-          'Manuel Nakit Girişi', 'Klasörü Aç' ve 'Klasörü Tara' butonları tekrar gösterilir (show()).
-        """
+    def _switch_to_page(self, index: int):
+        """Sayfalar (0: Fatura Takip, 1: Gider Yönetimi, 2: Sürüm Geçmişi) arasında dinamik geçiş yapar."""
         if not hasattr(self, "stack"):
             return
 
-        current_idx = self.stack.currentIndex()
-        if current_idx == 0:
-            # Fatura Takip -> Gider Yönetimi
-            self.stack.setCurrentIndex(1)
+        self.stack.setCurrentIndex(index)
+        is_invoice_page = (index == 0)
+        self._update_header_buttons_visibility(is_invoice_page)
+
+        # Buton stilleri ve metinleri
+        if index == 0:
+            # Fatura Takip
+            if hasattr(self, "btn_expenses"):
+                self.btn_expenses.setText("📊 Gider Yönetimi")
+                self.btn_expenses.setStyleSheet(
+                    "background-color: #1E293B; color: #38BDF8; font-weight: bold; border: 1px solid #0284C7; padding: 6px 14px; border-radius: 6px;"
+                )
+            if hasattr(self, "btn_version_history"):
+                self.btn_version_history.setText("🕒 Sürüm Geçmişi")
+                self.btn_version_history.setStyleSheet(
+                    "background-color: #1E293B; color: #F59E0B; font-weight: bold; border: 1px solid #D97706; padding: 6px 14px; border-radius: 6px;"
+                )
+            self.refresh_all_tabs()
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage("Fatura Takip ekranına dönüldü.", 4000)
+
+        elif index == 1:
+            # Gider Yönetimi
             if hasattr(self, "btn_expenses"):
                 self.btn_expenses.setText("📄 Fatura Takibine Geç")
-                self.btn_expenses.setToolTip("Gider Yönetiminden çıkıp ana Fatura Takip ekranına dön")
                 self.btn_expenses.setStyleSheet(
                     "background-color: #0284C7; color: #FFFFFF; font-weight: bold; border: 1px solid #38BDF8; padding: 6px 14px; border-radius: 6px;"
                 )
-            self._update_header_buttons_visibility(False)
+            if hasattr(self, "btn_version_history"):
+                self.btn_version_history.setText("🕒 Sürüm Geçmişi")
+                self.btn_version_history.setStyleSheet(
+                    "background-color: #1E293B; color: #F59E0B; font-weight: bold; border: 1px solid #D97706; padding: 6px 14px; border-radius: 6px;"
+                )
             if hasattr(self, "expenses_widget"):
                 self.expenses_widget.refresh_all()
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage("Gider Yönetimi ve Finansal Analiz modülü görüntüleniyor.", 4000)
-        else:
-            # Gider Yönetimi -> Fatura Takip
-            self.stack.setCurrentIndex(0)
+
+        elif index == 2:
+            # Sürüm Geçmişi
             if hasattr(self, "btn_expenses"):
                 self.btn_expenses.setText("📊 Gider Yönetimi")
-                self.btn_expenses.setToolTip("Gider türlerini düzenle, yeni gider kaydet ve Gelir - Gider finansal özetini incele")
                 self.btn_expenses.setStyleSheet(
                     "background-color: #1E293B; color: #38BDF8; font-weight: bold; border: 1px solid #0284C7; padding: 6px 14px; border-radius: 6px;"
                 )
-            self._update_header_buttons_visibility(True)
-            self.refresh_all_tabs()
+            if hasattr(self, "btn_version_history"):
+                self.btn_version_history.setText("📄 Fatura Takibine Geç")
+                self.btn_version_history.setStyleSheet(
+                    "background-color: #D97706; color: #FFFFFF; font-weight: bold; border: 1px solid #F59E0B; padding: 6px 14px; border-radius: 6px;"
+                )
+            if hasattr(self, "version_history_page"):
+                self.version_history_page.refresh_page()
             if hasattr(self, "status_bar"):
-                self.status_bar.showMessage("Fatura Takip ekranına dönüldü.", 4000)
+                self.status_bar.showMessage("Sürüm Geçmişi ve Fark Analizi (Diff) modülü görüntüleniyor.", 4000)
+
+    def _toggle_view_mode(self):
+        """Gider Yönetimi butonu tıklandığında geçiş yapar."""
+        current_idx = self.stack.currentIndex()
+        if current_idx == 1:
+            self._switch_to_page(0)
+        else:
+            self._switch_to_page(1)
+
+    def _toggle_version_history_mode(self):
+        """Sürüm Geçmişi butonu tıklandığında geçiş yapar."""
+        current_idx = self.stack.currentIndex()
+        if current_idx == 2:
+            self._switch_to_page(0)
+        else:
+            self._switch_to_page(2)
 
     def _open_expenses_dialog(self):
         """Geriye dönük uyumluluk çağrısı: Görünüm modunu değiştirir."""
@@ -384,7 +436,7 @@ class FaturaTakipApp(QMainWindow):
         self.btn_scan.clicked.connect(self._scan_folder_now)
         layout.addWidget(self.btn_scan)
 
-        # Gider Yönetimi Butonu (Doğrudan Klasörü Tara ile Güncellemeleri Kontrol Et arasında)
+        # Gider Yönetimi Butonu
         self.btn_expenses = QPushButton("📊 Gider Yönetimi")
         self.btn_expenses.setObjectName("secondaryBtn")
         self.btn_expenses.setStyleSheet(
@@ -394,17 +446,20 @@ class FaturaTakipApp(QMainWindow):
         self.btn_expenses.clicked.connect(self._toggle_view_mode)
         layout.addWidget(self.btn_expenses)
 
-        # Güncellemeleri Kontrol Et Butonu
-        self.btn_check_update = QPushButton("🚀 Güncellemeler")
-        self.btn_check_update.setObjectName("secondaryBtn")
-        self.btn_check_update.setToolTip("GitHub üzerinden yeni sürüm kontrolü yap")
-        self.btn_check_update.clicked.connect(self._manual_check_for_updates)
-        layout.addWidget(self.btn_check_update)
+        # Sürüm Geçmişi Butonu (Gider Yönetimi ile Ayarlar arasında)
+        self.btn_version_history = QPushButton("🕒 Sürüm Geçmişi")
+        self.btn_version_history.setObjectName("secondaryBtn")
+        self.btn_version_history.setStyleSheet(
+            "background-color: #1E293B; color: #F59E0B; font-weight: bold; border: 1px solid #D97706; padding: 6px 14px; border-radius: 6px;"
+        )
+        self.btn_version_history.setToolTip("Eski sürümleri incele, fark analizi yap ve seçici geri yükle")
+        self.btn_version_history.clicked.connect(self._toggle_version_history_mode)
+        layout.addWidget(self.btn_version_history)
 
-        # Dropbox Ayarları Butonu
+        # Ayarlar Butonu (Dropbox, Güncellemeler ve Yerel Sürüm Geçmişi)
         self.btn_settings = QPushButton("⚙️")
         self.btn_settings.setObjectName("secondaryBtn")
-        self.btn_settings.setToolTip("Dropbox API anahtarlarını ve senkronizasyon ayarlarını yapılandır")
+        self.btn_settings.setToolTip("Sistem Ayarları (Dropbox, Güncellemeler ve Yerel Sürüm Geçmişi)")
         self.btn_settings.clicked.connect(self._open_dropbox_settings_dialog)
         layout.addWidget(self.btn_settings)
 
@@ -1217,6 +1272,11 @@ class FaturaTakipApp(QMainWindow):
                 self.expenses_widget.refresh_all()
             except Exception as e:
                 print(f"[ExpensesWidget Refresh Hatası] {e}")
+        if hasattr(self, "version_history_page"):
+            try:
+                self.version_history_page.refresh_page()
+            except Exception as e:
+                print(f"[VersionHistoryPage Refresh Hatası] {e}")
         self.refresh_all_tabs()
         self.status_bar.showMessage("✓ Dropbox: Buluttaki güncel veriler çekildi ve listeler yenilendi.", 5000)
 
@@ -2273,10 +2333,14 @@ class FaturaTakipApp(QMainWindow):
         self.updater.check_for_updates(silent_if_latest=False)
 
     def _open_dropbox_settings_dialog(self):
-        """Dropbox Ayarları penceresini açar."""
-        dlg = DropboxAyarlariDialog(
+        """Ayarlar penceresini açar (Dropbox, Güncellemeler ve Yerel Sürüm Geçmişi)."""
+        dlg = AyarlarDialog(
             on_saved_callback=self._on_dropbox_credentials_saved,
             base_dir=self.base_dir,
+            db=self.db,
+            expense_db=getattr(self, "expense_db", None),
+            dropbox_sync=self.dropbox_sync,
+            updater=self.updater,
             parent=self,
         )
         dlg.exec()

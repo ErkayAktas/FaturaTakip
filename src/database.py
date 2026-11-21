@@ -175,6 +175,13 @@ class InvoiceDatabase:
         """Kayıtları güvenli ve atomik şekilde infos.json dosyasına kaydeder ve Dropbox'a anlık bildirim gönderir."""
         with self.lock:
             try:
+                # Değişiklik öncesi yerel snapshot kaydı
+                try:
+                    from src.backup_manager import backup_manager
+                    backup_manager.create_snapshot("infos", self.json_path)
+                except Exception as b_err:
+                    print(f"[Backup Warning] infos.json snapshot hatası: {b_err}")
+
                 temp_file = tempfile.NamedTemporaryFile(
                     mode="w",
                     dir=self.storage_dir,
@@ -187,6 +194,12 @@ class InvoiceDatabase:
                 temp_file.close()
                 shutil.move(temp_file.name, self.json_path)
                 
+                # Yeni sürümün snapshot kaydı (yalnızca içerik değiştiyse kaydedilir)
+                try:
+                    backup_manager.create_snapshot("infos", self.json_path)
+                except Exception:
+                    pass
+
                 # Anlık Değişiklik Bildirimi (Dropbox Sync vb.)
                 self._notify_change()
                 return True
@@ -543,6 +556,13 @@ class ExpenseDatabase:
         """Veriyi güvenli ve atomik şekilde expenses.json dosyasına kaydeder ve Dropbox'a bildirim gönderir."""
         with self.lock:
             try:
+                # Değişiklik öncesi yerel snapshot kaydı
+                try:
+                    from src.backup_manager import backup_manager
+                    backup_manager.create_snapshot("expenses", self.json_path)
+                except Exception as b_err:
+                    print(f"[Backup Warning] expenses.json snapshot hatası: {b_err}")
+
                 temp_file = tempfile.NamedTemporaryFile(
                     mode="w",
                     dir=self.storage_dir,
@@ -554,6 +574,12 @@ class ExpenseDatabase:
                 os.fsync(temp_file.fileno())
                 temp_file.close()
                 shutil.move(temp_file.name, self.json_path)
+
+                # Yeni sürümün snapshot kaydı
+                try:
+                    backup_manager.create_snapshot("expenses", self.json_path)
+                except Exception:
+                    pass
 
                 self._notify_change()
                 return True

@@ -24,14 +24,28 @@ CONFIG_FILE_NAME = "config.json"
 
 
 def get_config_file_path(base_dir: Optional[str] = None) -> str:
-    """Uygulamanın config.json yapılandırma dosyası yolunu döner."""
+    """Uygulamanın TasımaBelgeler/config.json yapılandırma dosyası yolunu döner."""
     if not base_dir:
         try:
             from src.database import get_app_base_dir
             base_dir = get_app_base_dir()
         except Exception:
             base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    return os.path.join(base_dir, CONFIG_FILE_NAME)
+
+    tasima_dir = os.path.join(base_dir, "TasımaBelgeler")
+    os.makedirs(tasima_dir, exist_ok=True)
+    target_config = os.path.join(tasima_dir, CONFIG_FILE_NAME)
+
+    # Geriye dönük uyumluluk: Hedef yoksa ancak kök dizinde eski config.json varsa otomatik taşı/kopyala
+    old_config = os.path.join(base_dir, CONFIG_FILE_NAME)
+    if not os.path.exists(target_config) and os.path.exists(old_config):
+        try:
+            shutil.copyfile(old_config, target_config)
+            logger.info(f"Eski config.json ({old_config}) yeni konuma ({target_config}) aktarıldı.")
+        except Exception as e:
+            logger.warning(f"Eski config.json kopyalanamadı: {e}")
+
+    return target_config
 
 
 def load_dropbox_config(base_dir: Optional[str] = None) -> Dict[str, str]:
@@ -258,6 +272,11 @@ class DropboxSyncManager(QObject):
                 dbx.files_download_to_file(temp_download, self.remote_path)
 
                 with self._lock:
+                    try:
+                        from src.backup_manager import backup_manager
+                        backup_manager.create_snapshot("infos", self.local_json_path)
+                    except Exception as b_err:
+                        logger.warning(f"[Backup] infos snapshot hatası: {b_err}")
                     shutil.move(temp_download, self.local_json_path)
                     self.last_known_rev = remote_metadata.rev
 
@@ -283,6 +302,11 @@ class DropboxSyncManager(QObject):
                     temp_exp = os.path.join(self.storage_dir, f"temp_dbx_exp_{int(time.time())}.json")
                     dbx.files_download_to_file(temp_exp, self.remote_expenses_path)
                     with self._lock:
+                        try:
+                            from src.backup_manager import backup_manager
+                            backup_manager.create_snapshot("expenses", self.local_expenses_path)
+                        except Exception as b_err:
+                            logger.warning(f"[Backup] expenses snapshot hatası: {b_err}")
                         shutil.move(temp_exp, self.local_expenses_path)
                         self.last_known_expenses_rev = exp_metadata.rev
                 elif os.path.exists(self.local_expenses_path):
@@ -500,6 +524,11 @@ class DropboxSyncManager(QObject):
                 dbx.files_download_to_file(temp_download, self.remote_path)
 
                 with self._lock:
+                    try:
+                        from src.backup_manager import backup_manager
+                        backup_manager.create_snapshot("infos", self.local_json_path)
+                    except Exception as b_err:
+                        logger.warning(f"[Backup] infos autosync snapshot hatası: {b_err}")
                     shutil.move(temp_download, self.local_json_path)
                     self.last_known_rev = remote_metadata.rev
 
@@ -515,6 +544,11 @@ class DropboxSyncManager(QObject):
                     temp_download_exp = os.path.join(self.storage_dir, f"temp_dbx_exp_sync_{int(time.time())}.json")
                     dbx.files_download_to_file(temp_download_exp, self.remote_expenses_path)
                     with self._lock:
+                        try:
+                            from src.backup_manager import backup_manager
+                            backup_manager.create_snapshot("expenses", self.local_expenses_path)
+                        except Exception as b_err:
+                            logger.warning(f"[Backup] expenses autosync snapshot hatası: {b_err}")
                         shutil.move(temp_download_exp, self.local_expenses_path)
                         self.last_known_expenses_rev = exp_metadata.rev
                     self.data_reloaded_from_cloud.emit()

@@ -1762,39 +1762,91 @@ class GiderDuzenleDialog(BaseResponsiveDialog):
             QMessageBox.critical(self, "Hata", "Gider kaydı güncellenirken bir hata oluştu.")
 
 
-class DropboxAyarlariDialog(BaseResponsiveDialog):
+class AyarlarDialog(BaseResponsiveDialog):
     """
-    Dropbox Yedekleme ve Senkronizasyon Ayarları Penceresi (OAuth2):
-    - App Key, App Secret ve Refresh Token bilgilerini config.json dosyasına kaydeder.
-    - Şifre alanlarının gizlenip açılmasını sağlar.
-    - Kayıt sonrasında DropboxSyncManager'ı güncel kimlik bilgileriyle güvenli şekilde yeniden başlatır.
+    Sistem Ayarları Penceresi (Sekmeli Yapı):
+    1. Sekme: ☁️ Dropbox Ayarları
+       - App Key, App Secret ve Refresh Token yönetimi (config.json)
+    2. Sekme: 🚀 Güncellemeler & Sürüm Geçmişi
+       - Uygulama güncelleme denetimi (GitHub Releases)
+       - Yerel veri sürümleme (Gelir/Fatura ve Gider Snapshot Sistemi)
+       - Sürümleri listeleme, detaylarını görüntüleme ve tek tıkla geri yükleme
     """
 
-    def __init__(self, on_saved_callback=None, base_dir: Optional[str] = None, parent=None):
-        super().__init__(parent, max_screen_ratio=0.80)
+    def __init__(
+        self,
+        on_saved_callback=None,
+        base_dir: Optional[str] = None,
+        db=None,
+        expense_db=None,
+        dropbox_sync=None,
+        updater=None,
+        parent=None,
+    ):
+        super().__init__(parent, max_screen_ratio=0.85)
         self.on_saved_callback = on_saved_callback
         self.base_dir = base_dir
-        self.setWindowTitle("⚙️ Dropbox Yedekleme Ayarları (OAuth2)")
-        self.setMinimumWidth(500)
+        self.db = db
+        self.expense_db = expense_db
+        self.dropbox_sync = dropbox_sync
+        self.updater = updater or (getattr(parent, "updater", None) if parent else None)
+
+        self.setWindowTitle("⚙️ Sistem Ayarları & Sürüm Yönetimi")
+        self.setMinimumWidth(680)
+        self.setMinimumHeight(560)
         self._setup_ui()
 
     def _setup_ui(self):
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(18, 18, 18, 18)
-        root_layout.setSpacing(14)
+        root_layout.setContentsMargins(16, 16, 16, 14)
+        root_layout.setSpacing(12)
 
         # Üst Başlık Kartı
         header = QFrame()
-        header.setStyleSheet("background-color: #0F172A; border: 1px solid #334155; border-radius: 8px; padding: 12px 16px;")
+        header.setStyleSheet("background-color: #0F172A; border: 1px solid #334155; border-radius: 8px; padding: 10px 14px;")
         h_layout = QVBoxLayout(header)
-        h_layout.setSpacing(4)
-        lbl_title = QLabel("☁️ DROPBOX YEDEKLEME AYARLARI")
-        lbl_title.setStyleSheet("font-size: 15px; font-weight: 800; color: #FFFFFF;")
-        lbl_sub = QLabel("Kalıcı senkronizasyon için Dropbox API kimlik bilgilerinizi ve Refresh Token değerini girin.")
+        h_layout.setSpacing(2)
+        lbl_title = QLabel("⚙️ SİSTEM AYARLARI")
+        lbl_title.setStyleSheet("font-size: 14px; font-weight: 800; color: #FFFFFF;")
+        lbl_sub = QLabel("Dropbox senkronizasyon ayarları ve uygulama güncellemeleri.")
         lbl_sub.setStyleSheet("font-size: 11px; color: #94A3B8;")
         h_layout.addWidget(lbl_title)
         h_layout.addWidget(lbl_sub)
         root_layout.addWidget(header)
+
+        # Sekmeli Yapı
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet(
+            "QTabWidget::pane { border: 1px solid #334155; background-color: #1E293B; border-radius: 8px; top: -1px; } "
+            "QTabBar::tab { background-color: #0F172A; color: #94A3B8; padding: 8px 20px; font-weight: bold; border: 1px solid #334155; border-bottom: none; border-top-left-radius: 6px; border-top-right-radius: 6px; } "
+            "QTabBar::tab:selected { background-color: #1E293B; color: #FFFFFF; border-bottom: 2px solid #38BDF8; }"
+        )
+
+        # Sekme 1: Dropbox Ayarları
+        tab_dropbox = QWidget()
+        self._setup_dropbox_tab(tab_dropbox)
+        self.tabs.addTab(tab_dropbox, "☁️ Dropbox Ayarları")
+
+        # Sekme 2: Uygulama Güncellemeleri
+        tab_updates = QWidget()
+        self._setup_updates_tab(tab_updates)
+        self.tabs.addTab(tab_updates, "🚀 Uygulama Güncellemeleri")
+
+        root_layout.addWidget(self.tabs, 1)
+
+        # Alt Kapat Butonu
+        btn_box = QHBoxLayout()
+        btn_box.addStretch()
+        btn_close = QPushButton("Kapat")
+        btn_close.setStyleSheet("background-color: #334155; color: #FFFFFF; font-weight: bold; padding: 8px 22px; border-radius: 6px;")
+        btn_close.clicked.connect(self.accept)
+        btn_box.addWidget(btn_close)
+        root_layout.addLayout(btn_box)
+
+    def _setup_dropbox_tab(self, tab: QWidget):
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
 
         # Mevcut Değerleri config.json'dan yükle
         from src.dropbox_sync import load_dropbox_config
@@ -1802,7 +1854,7 @@ class DropboxAyarlariDialog(BaseResponsiveDialog):
 
         # Form Kartı
         form_card = QFrame()
-        form_card.setStyleSheet("background-color: #1E293B; border: 1px solid #334155; border-radius: 8px; padding: 14px;")
+        form_card.setStyleSheet("background-color: #0F172A; border: 1px solid #334155; border-radius: 8px; padding: 14px;")
         form = QFormLayout(form_card)
         form.setSpacing(12)
 
@@ -1810,7 +1862,7 @@ class DropboxAyarlariDialog(BaseResponsiveDialog):
         self.input_app_key = QLineEdit()
         self.input_app_key.setText(cfg.get("app_key", ""))
         self.input_app_key.setPlaceholderText("Dropbox App Key (Örn: 5ymg7fu8z3zha1n)...")
-        self.input_app_key.setStyleSheet("background-color: #0F172A; padding: 7px 10px; border-radius: 6px; color: #FFFFFF;")
+        self.input_app_key.setStyleSheet("background-color: #1E293B; padding: 7px 10px; border-radius: 6px; color: #FFFFFF; border: 1px solid #334155;")
         form.addRow("App Key (API Key) *:", self.input_app_key)
 
         # 2. App Secret
@@ -1818,7 +1870,7 @@ class DropboxAyarlariDialog(BaseResponsiveDialog):
         self.input_app_secret.setEchoMode(QLineEdit.EchoMode.Password)
         self.input_app_secret.setText(cfg.get("app_secret", ""))
         self.input_app_secret.setPlaceholderText("Dropbox App Secret...")
-        self.input_app_secret.setStyleSheet("background-color: #0F172A; padding: 7px 10px; border-radius: 6px; color: #FFFFFF;")
+        self.input_app_secret.setStyleSheet("background-color: #1E293B; padding: 7px 10px; border-radius: 6px; color: #FFFFFF; border: 1px solid #334155;")
         form.addRow("App Secret *:", self.input_app_secret)
 
         # 3. Refresh Token
@@ -1826,7 +1878,7 @@ class DropboxAyarlariDialog(BaseResponsiveDialog):
         self.input_refresh_token.setEchoMode(QLineEdit.EchoMode.Password)
         self.input_refresh_token.setText(cfg.get("refresh_token", ""))
         self.input_refresh_token.setPlaceholderText("Dropbox OAuth2 Refresh Token...")
-        self.input_refresh_token.setStyleSheet("background-color: #0F172A; padding: 7px 10px; border-radius: 6px; color: #FFFFFF;")
+        self.input_refresh_token.setStyleSheet("background-color: #1E293B; padding: 7px 10px; border-radius: 6px; color: #FFFFFF; border: 1px solid #334155;")
         form.addRow("Refresh Token *:", self.input_refresh_token)
 
         # Şifreleri Göster Checkbox
@@ -1835,29 +1887,86 @@ class DropboxAyarlariDialog(BaseResponsiveDialog):
         self.chk_show.toggled.connect(self._toggle_password_visibility)
         form.addRow("", self.chk_show)
 
-        root_layout.addWidget(form_card)
+        layout.addWidget(form_card)
 
         # Bilgi Notu
-        info_lbl = QLabel("💡 Bilgiler yerel 'config.json' dosyasına kaydedilir ve .gitignore ile korunur.")
+        info_lbl = QLabel("💡 Bilgiler yerel 'config.json' dosyasına güvenle kaydedilir ve .gitignore ile korunur.")
         info_lbl.setStyleSheet("font-size: 11px; color: #94A3B8; font-style: italic;")
-        root_layout.addWidget(info_lbl)
+        layout.addWidget(info_lbl)
 
-        # Butonlar
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(10)
-
-        btn_cancel = QPushButton("Kapat")
-        btn_cancel.setStyleSheet("background-color: #334155; color: #FFFFFF; font-weight: bold; padding: 8px 18px; border-radius: 6px;")
-        btn_cancel.clicked.connect(self.reject)
-
+        # Kaydet Butonu
+        btn_save_box = QHBoxLayout()
         btn_save = QPushButton("💾 Bilgileri Kaydet ve Bağlan")
         btn_save.setStyleSheet("background-color: #10B981; color: #FFFFFF; font-weight: bold; padding: 8px 24px; border-radius: 6px;")
         btn_save.clicked.connect(self._save_credentials)
+        btn_save_box.addStretch()
+        btn_save_box.addWidget(btn_save)
+        layout.addLayout(btn_save_box)
+        layout.addStretch()
 
-        btn_layout.addStretch()
-        btn_layout.addWidget(btn_cancel)
-        btn_layout.addWidget(btn_save)
-        root_layout.addLayout(btn_layout)
+    def _setup_updates_tab(self, tab: QWidget):
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
+
+        # Uygulama Güncelleyici Kartı
+        updater_card = QFrame()
+        updater_card.setStyleSheet("background-color: #0F172A; border: 1px solid #334155; border-radius: 8px; padding: 16px;")
+        u_box = QVBoxLayout(updater_card)
+        u_box.setSpacing(14)
+
+        u_header_row = QHBoxLayout()
+        u_info_vbox = QVBoxLayout()
+        u_info_vbox.setSpacing(4)
+        lbl_u_title = QLabel("🚀 UYGULAMA GÜNCELLEMELERİ (GITHUB RELEASES)")
+        lbl_u_title.setStyleSheet("font-size: 14px; font-weight: 800; color: #FFFFFF;")
+
+        from src.version import APP_VERSION
+        current_ver_str = APP_VERSION if str(APP_VERSION).startswith("v") else f"v{APP_VERSION}"
+        lbl_u_sub = QLabel(f"Mevcut Kurulu Sürüm: <b style='color: #38BDF8;'>{current_ver_str}</b>")
+        lbl_u_sub.setStyleSheet("font-size: 12px; color: #E2E8F0;")
+        u_info_vbox.addWidget(lbl_u_title)
+        u_info_vbox.addWidget(lbl_u_sub)
+        u_header_row.addLayout(u_info_vbox, 1)
+
+        self.btn_check_update_in_settings = QPushButton("🚀 Güncellemeleri Denetle")
+        self.btn_check_update_in_settings.setStyleSheet(
+            "QPushButton { background-color: #0284C7; color: white; font-weight: bold; font-size: 12px; padding: 10px 20px; border-radius: 6px; border: none; } "
+            "QPushButton:hover { background-color: #0369A1; } "
+            "QPushButton:pressed { background-color: #075985; } "
+            "QPushButton:disabled { background-color: #475569; color: #94A3B8; }"
+        )
+        self.btn_check_update_in_settings.clicked.connect(self._check_for_updates_clicked)
+        u_header_row.addWidget(self.btn_check_update_in_settings)
+        u_box.addLayout(u_header_row)
+
+        # Bilgilendirme Kutusu
+        info_box = QFrame()
+        info_box.setStyleSheet("background-color: #1E293B; border: 1px solid #334155; border-radius: 6px; padding: 12px;")
+        info_layout = QVBoxLayout(info_box)
+        info_layout.setSpacing(6)
+        
+        lbl_info_desc = QLabel("💡 Güncelleme kontrolü GitHub Releases API üzerinden doğrudan ve arka planda gerçekleştirilir.")
+        lbl_info_desc.setStyleSheet("font-size: 12px; color: #94A3B8;")
+        lbl_info_detail = QLabel("Yeni bir sürüm yayınlandığında bildirim alabilir, tek tıkla indirip uygulamanızı otomatik olarak en son sürüme yükseltebilirsiniz.")
+        lbl_info_detail.setStyleSheet("font-size: 11px; color: #64748B;")
+        info_layout.addWidget(lbl_info_desc)
+        info_layout.addWidget(lbl_info_detail)
+
+        u_box.addWidget(info_box)
+        layout.addWidget(updater_card)
+        layout.addStretch()
+
+    def _check_for_updates_clicked(self):
+        updater = self.updater
+        if not updater and self.parent() and hasattr(self.parent(), "updater"):
+            updater = self.parent().updater
+        if not updater:
+            from src.updater import AutoUpdater
+            updater = AutoUpdater(self)
+            self.updater = updater
+
+        updater.check_for_updates(silent_if_latest=False, trigger_button=self.btn_check_update_in_settings)
 
     def _toggle_password_visibility(self, checked: bool):
         mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
@@ -1886,6 +1995,10 @@ class DropboxAyarlariDialog(BaseResponsiveDialog):
             self.accept()
         else:
             QMessageBox.critical(self, "Hata", "Kimlik bilgileri yapılandırma dosyasına kaydedilemedi.")
+
+
+# Geriye dönük uyumluluk takma adı
+DropboxAyarlariDialog = AyarlarDialog
 
 
 class GiderYonetimiWidget(QWidget):

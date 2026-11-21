@@ -1,6 +1,7 @@
 __pycache__/
 TasımaBelgeler/
 config.json
+backups/
 update.bat
 guncel_fatura.exe
 *.old
